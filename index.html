@@ -1,0 +1,2315 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<meta name="theme-color" content="#04121a">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Deep Garden">
+<meta name="mobile-web-app-capable" content="yes">
+<link rel="manifest" href="./manifest.json">
+<link rel="apple-touch-icon" href="./icon-180.png">
+<link rel="icon" type="image/png" href="./icon-180.png">
+<title>DEEP GARDEN</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
+<style>
+  *{margin:0;padding:0;box-sizing:border-box;}
+  html,body{width:100%;height:100%;background:#04121a;overflow:hidden;
+    -webkit-user-select:none;user-select:none;touch-action:none;
+    font-family:'Press Start 2P',ui-monospace,monospace;}
+  #wrap{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;
+    padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);}
+  canvas{image-rendering:pixelated;image-rendering:crisp-edges;display:block;touch-action:none;}
+  #nameOv{position:fixed;inset:0;background:rgba(4,18,26,.94);display:none;
+    align-items:center;justify-content:center;flex-direction:column;gap:18px;z-index:9;padding:24px;}
+  #nameOv h1{color:#7fe9d0;font-size:14px;text-align:center;line-height:1.8;}
+  #nameOv input{font-family:inherit;font-size:12px;padding:12px;width:min(320px,80vw);
+    background:#0b2a38;border:2px solid #2f7f8f;color:#d8fff6;text-align:center;}
+  #nameOv button{font-family:inherit;font-size:11px;padding:12px 22px;background:#1d6b7a;
+    border:2px solid #7fe9d0;color:#eafffb;cursor:pointer;}
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="cv"></canvas></div>
+<div id="nameOv">
+  <h1>DEEP GARDEN<br>WHO TENDS THIS TANK?</h1>
+  <input id="nameIn" maxlength="14" placeholder="YOUR NAME">
+  <button id="nameOk">START</button>
+</div>
+<script>
+(function(){
+'use strict';
+
+/* ============================================================
+   DEEP GARDEN — evolution aquarium
+   Phase 1: core loop (swim / feed / grow / breed / merge / evolve)
+   ============================================================ */
+
+var VERSION = 'v2.2';
+var W = 960, H = 540;
+var SAVE_KEY = 'deepgarden_save_v1';
+var FLOOR = 476;          // substrate top
+var SURFACE = 34;         // water surface
+var PEARL_CAP = 99999;
+var SPAWN_COOLDOWN = 30;  // seconds, NEW LIFE button
+var FRAMES = 6;           // swim animation frames
+var EVENT_T = 1.5;        // how long a discovery card holds the screen, seconds
+
+/* ---------- 1. PIXEL PRIMITIVES (PIXEL_ART_SPEC §1) ---------- */
+function rp(c,x,y,w,h,col){ c.fillStyle=col; c.fillRect(x|0,y|0,Math.max(1,w|0),Math.max(1,h|0)); }
+function px(c,x,y,col){ rp(c,x,y,1,1,col); }
+function circ(c,cx,cy,r,col){
+  cx|=0; cy|=0; r=Math.round(r); if(r<1) return;
+  c.fillStyle=col;
+  for(var y=-r;y<=r;y++){ var w=Math.floor(Math.sqrt(Math.max(0,r*r-y*y))); c.fillRect(cx-w,cy+y,2*w+1,1); }
+}
+function ell(c,cx,cy,rx,ry,col){
+  cx|=0; cy|=0; rx=Math.round(rx); ry=Math.round(ry); if(rx<1||ry<1) return;
+  c.fillStyle=col;
+  for(var y=-ry;y<=ry;y++){ var w=Math.floor(rx*Math.sqrt(Math.max(0,1-(y*y)/(ry*ry)))); c.fillRect(cx-w,cy+y,2*w+1,1); }
+}
+/* wedge: base at (x0,cy) tapering to (x0-len, cy+off) */
+function wedge(c,x0,cy,len,off,th0,th1,col){
+  len=Math.max(1,Math.round(len));
+  for(var i=0;i<=len;i++){
+    var t=i/len, y=Math.round(cy+off*t), h=Math.max(1,Math.round(th0+(th1-th0)*t));
+    rp(c,x0-i,y-h,1,2*h,col);
+  }
+}
+/* tri: triangular fin/tail */
+function tri(c,x0,cy,len,halfEnd,off,col,inflate){
+  inflate=inflate||0; len=Math.max(1,Math.round(len));
+  for(var i=0;i<=len+inflate;i++){
+    var t=Math.min(1,i/len), h=Math.max(1,Math.round(2+halfEnd*t)+inflate), y=Math.round(cy+off*t);
+    rp(c,x0-i,y-h,1,2*h,col);
+  }
+}
+
+/* dome: only the half above the base line - decor is rooted on the floor */
+function dome(c,cx,baseY,rx,ry,col){
+  cx|=0; baseY|=0; rx=Math.round(rx); ry=Math.round(ry);
+  if(rx<1||ry<1) return;
+  c.fillStyle=col;
+  for(var y=0;y<=ry;y++){
+    var w=Math.floor(rx*Math.sqrt(Math.max(0,1-(y*y)/(ry*ry))));
+    c.fillRect(cx-w, baseY-y, 2*w+1, 1);
+  }
+}
+/* spike: a triangle growing UP from a base (tri() points sideways) */
+function spike(c,cx,baseY,halfW,height,tipDx,col){
+  cx|=0; baseY|=0; height=Math.max(1,Math.round(height));
+  c.fillStyle=col;
+  for(var i=0;i<=height;i++){
+    var t=i/height, hw=Math.max(1,Math.round(halfW*(1-t*0.92)));
+    c.fillRect(Math.round(cx+tipDx*t)-hw, baseY-i, hw*2+1, 1);
+  }
+}
+
+/* ---------- 2. SEEDED PRNG (PIXEL_ART_SPEC §2) ---------- */
+function mulberry32(a){ return function(){
+  a|=0; a=a+0x6D2B79F5|0;
+  var t=Math.imul(a^a>>>15,1|a);
+  t=t+Math.imul(t^t>>>7,61|t)^t;
+  return ((t^t>>>14)>>>0)/4294967296;
+};}
+var gameRnd = mulberry32(0xBEEF01); // gameplay randomness (not graphics)
+
+/* ---------- 3. NOISE (PIXEL_ART_SPEC §5) ---------- */
+function makeWaves(rnd,n){
+  var w=[];
+  for(var i=0;i<n;i++) w.push({amp:1/(i+1),a:0.006+rnd()*0.05,b:0.006+rnd()*0.05,p:rnd()*6.283,q:rnd()*6.283});
+  return w;
+}
+function noise(waves,x,y){
+  var s=0,t=0;
+  for(var i=0;i<waves.length;i++){ var w=waves[i]; s+=w.amp*Math.sin(x*w.a+w.p)*Math.cos(y*w.b+w.q); t+=w.amp; }
+  return s/t; // -1..1
+}
+function step(v,n){ var i=Math.floor((v*0.5+0.5)*n); return i<0?0:(i>n-1?n-1:i); }
+
+/* ---------- 4. SPRITE BAKERY ---------- */
+function makeSprite(w,h,draw){
+  var c=document.createElement('canvas');
+  c.width=Math.max(1,w|0); c.height=Math.max(1,h|0);
+  var x=c.getContext('2d');
+  draw(x,c.width,c.height);
+  return c;
+}
+
+/* ---------- CLOUD LEADERBOARD (Firebase REST) ----------
+   Paste your database URL below. Use a NEW node for this game so it never mixes
+   with an older one. Leave it empty and the game simply runs offline. */
+var LB_URL = '';   // e.g. 'https://YOUR-DB.firebaseio.com/scores_aqua1.json'
+var LB = { status:'Offline', rows:[], tab:'all', t:0, sending:false };
+function lbSubmit(){
+  if(!LB_URL || !G.name) return;
+  LB.status='Syncing...';
+  var body = JSON.stringify({
+    name:String(G.name).slice(0,24),
+    species:speciesCount(),
+    merges:G.stats.merges|0,
+    ts:Date.now()
+  });
+  try{
+    fetch(LB_URL,{method:'POST',cache:'no-store',headers:{'Content-Type':'application/json'},body:body})
+      .then(function(){ LB.status='Synced'; lbFetch(); })
+      .catch(function(){ LB.status='Offline'; });
+  }catch(e){ LB.status='Offline'; }
+}
+function lbFetch(){
+  if(!LB_URL){ LB.status='Not set up'; return; }
+  LB.status='Syncing...';
+  try{
+    fetch(LB_URL,{cache:'no-store'})
+      .then(function(r){ return r.json(); })
+      .then(function(j){
+        var rows=[], k;
+        for(k in j){
+          var r=j[k];
+          if(!r || typeof r!=='object') continue;
+          rows.push({ name:String(r.name||'?').slice(0,24), species:num(r.species,0,0,999),
+                      merges:num(r.merges,0,0,999999), ts:num(r.ts,0,0,1e15) });
+        }
+        LB.rows=rows;
+        LB.status='Synced';
+      })
+      .catch(function(){ LB.status='Offline'; });
+  }catch(e){ LB.status='Offline'; }
+}
+function lbVisible(){
+  var wk=Date.now()-7*24*3600*1000;
+  var rows=LB.rows.filter(function(x){ return LB.tab==='all' || x.ts>=wk; });
+  var best={}, i;                                  // one row per player: their best run, not their last
+  for(i=0;i<rows.length;i++){
+    var e=best[rows[i].name];
+    if(!e || rows[i].species>e.species || (rows[i].species===e.species && rows[i].merges>e.merges)) best[rows[i].name]=rows[i];
+  }
+  var out=Object.keys(best).map(function(n){ return best[n]; });
+  out.sort(function(a,b){ return (b.species-a.species) || (b.merges-a.merges); });
+  return out.slice(0,10);
+}
+
+/* ---------- 5. PALETTES  [outline, shadow, base, light, glow] ---------- */
+var PAL = {
+  guppy:      ['#4a1a12','#8f3320','#d2662f','#f4a24a','#ffd98a'],
+  moss:       ['#12331a','#2c6b32','#4f9c46','#8ed26a','#c9f58a'],
+  lantern:    ['#151b45','#2f3f8c','#4f6fd0','#8fb6ff','#b7f0ff'],
+  tetra:      ['#101d3a','#1e3f7a','#2f74c0','#66c6f0','#a8f2ff'],
+  dart:       ['#1a2230','#33465e','#5b7b9c','#9dc4de','#e2f6ff'],
+  ghost:      ['#20304a','#3c5a72','#6d8fa6','#b6d6e2','#e8fbff'],
+  catfish:    ['#2a2018','#4f3d2a','#7a6144','#a98a5f','#d9c08a'],
+  plated:     ['#22262c','#414a55','#666f7c','#98a2ae','#d3dbe4'],
+  silt:       ['#101418','#242c34','#3b4650','#5d6c78','#7ce0d8'],
+  angel:      ['#231e2c','#463c54','#6f6382','#a99bbd','#e8dcff'],
+  sail:       ['#1c2c2c','#2f5652','#4a8478','#7fc0aa','#cdf3de'],
+  wraith:     ['#241033','#4a1e63','#77339b','#b268d6','#f0b8ff'],
+  prism:      ['#1a1030','#3d2168','#6b3fb0','#a97ff0','#ffe6ff'],
+  glassdart:  ['#12303a','#1f5766','#2f8a9c','#66d3de','#d8ffff'],
+  bone:       ['#241f1c','#4a423a','#776d60','#a89a86','#efe6d2'],
+  orbit:      ['#0f2436','#1d4560','#2f7290','#5fb6cc','#c7fbff'],
+  /* chimeras - born only from crossing two adult mutants */
+  prismbloom: ['#2a0f3d','#5a2380','#8f45c8','#c98cff','#ffe4ff'],
+  glassseer:  ['#0d2f3a','#1c6070','#2f9aae','#72dff0','#e6ffff'],
+  bonechoir:  ['#2b241b','#544733','#857258','#bda88a','#ffeccb'],
+  orbitcrown: ['#0d2438','#1c4a6e','#2f7ea8','#63c2e0','#ccfaff'],
+  prismlance: ['#241246','#472a8c','#6f4fd0','#a894ff','#f0e0ff'],
+  geode:      ['#2b1f2e','#4f3a55','#7a5f80','#ab90b0','#f0d8ff'],
+  stargarden: ['#12302a','#245a4a','#3d8f6a','#78c98e','#e8ffd0'],
+  ghostfossil:['#1c2a2e','#39525a','#5d8189','#93bcc0','#e8fbff'],
+  cometveil:  ['#101a3a','#243a78','#3f66b8','#7fa8f0','#dfe8ff'],
+  reliccrown: ['#3a2410','#6e4520','#a06f34','#d8a85c','#fff0c0'],
+  /* unlocked by achievements */
+  shrimp:     ['#4a1e14','#8a3a24','#c26038','#e89060','#ffd0a0'],
+  ironshrimp: ['#26282e','#454a55','#6b7280','#9aa4b2','#dfe6ee'],
+  dartshrimp: ['#3a1030','#701e58','#a83a80','#e07ab8','#ffd0ee'],
+  ghostshrimp:['#1e3038','#365660','#548290','#8cc0cc','#e0ffff'],
+  snail:      ['#3a2a16','#6a4e26','#98763c','#c8a45e','#f0dca0'],
+  spireshell: ['#2a2630','#4c4658','#726a84','#a29ab4','#e0d8f0'],
+  gardensnail:['#16301a','#2c5c30','#48904a','#78c470','#c0f0a0'],
+  voidshell:  ['#161020','#2e2044','#4c3670','#7a5aa8','#c0a0e8'],
+  jelly:      ['#2a1840','#4e2a70','#7a46a8','#ac7ad8','#e8c0ff'],
+  lanternjelly:['#2a2a10','#585a1e','#8e9034','#c6c860','#fff8a0'],
+  deepbell:   ['#0e1622','#1e2c40','#344660','#546888','#88a0c0'],
+  glassbell:  ['#16323a','#28606c','#3e94a4','#78d0dc','#e0ffff'],
+  seahorse:   ['#143a30','#22685a','#38a084','#5fd0a8','#a8ffd8'],
+  weedhorse:  ['#1c3410','#38621e','#5c9432','#90c85a','#d8f890'],
+  crownhorse: ['#3a1428','#6e2450','#a83c7c','#dc74ac','#ffc0e0'],
+  boneseahorse:['#2a2820','#4e4a3a','#767058','#a89e80','#e8e0c0'],
+  kingprawn:  ['#4a1020','#8a2038','#c23a56','#e87a90','#ffd0d8'],
+  cathedral:  ['#201a2e','#3e3454','#645a80','#948ab0','#d8d0f0'],
+  sunjelly:   ['#3a2410','#7a4a18','#c07a28','#f0b050','#fff0a0'],
+  dragonhorse:['#102a3a','#1e5068','#308098','#58bcd0','#a8f8ff']
+};
+
+/* ---------- UI SIGNAL COLOURS ----------
+   Reserved for the interface only. No creature may glow anywhere near these hues,
+   or a living halo starts reading as a hint. A test guards this.
+   green = safe merge, orange = risky, red = you may lose both. */
+var SIGNAL = { ok:'#00ff5a', unstable:'#ffd400', chimera:'#ff2828' };
+
+/* ---------- 6. EVOLUTION AXES ---------- */
+var AXES = ['LUMEN','ABYSS','ARMOR','FLOW','BLOOM','CHIMERA'];
+function newDiet(){ return {LUMEN:0,ABYSS:0,ARMOR:0,FLOW:0,BLOOM:0,CHIMERA:0}; }
+
+/* ---------- 7. SPECIES TABLE ---------- */
+/* body: spindle|slim|flat|disc|blob   tail: fan|fork|lobe|veil
+   extra: none|glow|moss|plates|whiskers|tendrils|spines|crystal|orb
+   pattern: none|stripes|spots|neon                                     */
+function S(o){ return o; }
+var SPECIES = {
+  guppy: S({ id:'guppy', name:'GUPPY', base:true, seed:101,
+    body:'spindle', tail:'fan', dorsal:'small', extra:'none', pattern:'spots', pal:PAL.guppy,
+    axes:['LUMEN','BLOOM'], evolveTo:{LUMEN:'lantern',BLOOM:'mossback'}, mutant:'prismfry',
+    desc:'A tiny, restless fish. Breeds fast and eats anything. Every deep garden starts here.' }),
+  tetra: S({ id:'tetra', name:'NEON TETRA', base:true, seed:102,
+    body:'slim', tail:'fork', dorsal:'small', extra:'none', pattern:'neon', pal:PAL.tetra,
+    axes:['FLOW','LUMEN'], evolveTo:{FLOW:'dart',LUMEN:'ghostneon'}, mutant:'glassdart',
+    desc:'Swims in schools. The bright stripe is not paint - it is a mirror of tiny crystals.' }),
+  catfish: S({ id:'catfish', name:'CATFISH', base:true, seed:103,
+    body:'flat', tail:'lobe', dorsal:'small', extra:'whiskers', pattern:'none', pal:PAL.catfish,
+    axes:['ARMOR','ABYSS'], evolveTo:{ARMOR:'plated',ABYSS:'siltlurker'}, mutant:'bonecrawler',
+    desc:'Hugs the floor and tastes the world with its whiskers. It can find food in total darkness.' }),
+  angel: S({ id:'angel', name:'ANGELFISH', base:true, seed:104,
+    body:'disc', tail:'veil', dorsal:'sail', extra:'none', pattern:'stripes', pal:PAL.angel,
+    axes:['FLOW','CHIMERA'], evolveTo:{FLOW:'sailangel',CHIMERA:'veilwraith'}, mutant:'orbitveil',
+    desc:'A tall, calm swimmer. Its flat body lets it slip between plant stems.' }),
+
+  lantern: S({ id:'lantern', name:'LANTERN GUPPY', seed:201,
+    body:'spindle', tail:'fan', dorsal:'small', extra:'glow', pattern:'spots', pal:PAL.lantern,
+    axes:['LUMEN'], evolveTo:{}, mutant:'prismfry', glow:'#8fd8ff',
+    desc:'Fed on glow plankton for generations. It now makes its own cold light in the belly.' }),
+  mossback: S({ id:'mossback', name:'MOSSBACK', seed:202,
+    body:'spindle', tail:'fan', dorsal:'small', extra:'moss', pattern:'none', pal:PAL.moss,
+    axes:['BLOOM'], evolveTo:{}, mutant:'prismfry',
+    desc:'Algae grow on its back and feed it sugar from light. Half animal, half garden.' }),
+  dart: S({ id:'dart', name:'DART TETRA', seed:203,
+    body:'slim', tail:'fork', dorsal:'small', extra:'spines', pattern:'neon', pal:PAL.dart,
+    axes:['FLOW'], evolveTo:{}, mutant:'glassdart',
+    desc:'Built like an arrow. It crosses the whole tank in one breath.' }),
+  ghostneon: S({ id:'ghostneon', name:'GHOST NEON', seed:204,
+    body:'slim', tail:'fork', dorsal:'small', extra:'glow', pattern:'neon', pal:PAL.ghost, glow:'#a8e8ff',
+    axes:['LUMEN'], evolveTo:{}, mutant:'glassdart',
+    desc:'Its body turned clear as water. Only the glowing spine gives it away.' }),
+  plated: S({ id:'plated', name:'PLATED CAT', seed:205,
+    body:'flat', tail:'lobe', dorsal:'small', extra:'plates', pattern:'none', pal:PAL.plated,
+    axes:['ARMOR'], evolveTo:{}, mutant:'bonecrawler',
+    desc:'Grit in the diet became armour. Bone plates lock over its back like roof tiles.' }),
+  siltlurker: S({ id:'siltlurker', name:'SILT LURKER', seed:206,
+    body:'flat', tail:'lobe', dorsal:'none', extra:'tendrils', pattern:'none', pal:PAL.silt, glow:'#57e0d0',
+    axes:['ABYSS'], evolveTo:{}, mutant:'bonecrawler',
+    desc:'Lives in the dark and gave up its eyes. Feeler threads read the water instead.' }),
+  sailangel: S({ id:'sailangel', name:'SAIL ANGEL', seed:207,
+    body:'disc', tail:'veil', dorsal:'sail', extra:'none', pattern:'stripes', pal:PAL.sail,
+    axes:['FLOW'], evolveTo:{}, mutant:'orbitveil',
+    desc:'The fin grew into a sail. It rides the current instead of fighting it.' }),
+  veilwraith: S({ id:'veilwraith', name:'VEIL WRAITH', seed:208,
+    body:'disc', tail:'veil', dorsal:'sail', extra:'tendrils', pattern:'none', pal:PAL.wraith, glow:'#c874ff',
+    axes:['CHIMERA'], evolveTo:{}, mutant:'orbitveil',
+    desc:'Something strange happened in the dark. It trails threads and drifts like smoke.' }),
+
+  prismfry: S({ id:'prismfry', name:'PRISM FRY', seed:301, mutantOf:'guppy',
+    body:'blob', tail:'fan', dorsal:'none', extra:'crystal', pattern:'none', pal:PAL.prism, glow:'#e0a0ff',
+    axes:['CHIMERA'], evolveTo:{}, mutant:null,
+    desc:'MUTANT. Its scales grew into crystal facets that split light into colours.' }),
+  glassdart: S({ id:'glassdart', name:'GLASS DART', seed:302, mutantOf:'tetra',
+    body:'slim', tail:'veil', dorsal:'sail', extra:'crystal', pattern:'none', pal:PAL.glassdart, glow:'#5ffbff',
+    axes:['CHIMERA'], evolveTo:{}, mutant:null,
+    desc:'MUTANT. A see-through blade of a fish. You mostly notice the shadow it casts.' }),
+  bonecrawler: S({ id:'bonecrawler', name:'BONE CRAWLER', seed:303, mutantOf:'catfish',
+    body:'flat', tail:'lobe', dorsal:'none', extra:'spines', pattern:'stripes', pal:PAL.bone,
+    axes:['ARMOR'], evolveTo:{}, mutant:null,
+    desc:'MUTANT. It wears its skeleton on the outside, like a walking fossil.' }),
+  orbitveil: S({ id:'orbitveil', name:'ORBIT VEIL', seed:304, mutantOf:'angel',
+    body:'blob', tail:'veil', dorsal:'none', extra:'orb', pattern:'none', pal:PAL.orbit, glow:'#5a7cff',
+    axes:['CHIMERA'], evolveTo:{}, mutant:null,
+    desc:'MUTANT. Small glowing beads circle its body. Nobody knows what holds them there.' }),
+
+  /* ---- CHIMERAS: one per pair of mutants. Same line = APEX, crossed lines = LEGENDARY.
+         Each stacks several organs, so no two share a silhouette (template §8). ---- */
+  prismbloom: S({ id:'prismbloom', name:'PRISM BLOOM', seed:401, chimera:true, rare:'APEX',
+    body:'blob', tail:'veil', dorsal:'sail', extra:['crystal','spines'], pattern:'none', pal:PAL.prismbloom, glow:'#c98cff',
+    axes:[], evolveTo:{}, mutant:null,
+    desc:'Two prism fry, one body. The facets kept growing until the fish became a drifting geode.' }),
+  glassseer: S({ id:'glassseer', name:'GLASS SEER', seed:402, chimera:true, rare:'APEX',
+    body:'disc', tail:'fork', dorsal:'none', extra:['crystal','glow'], pattern:'neon', pal:PAL.glassseer, glow:'#72dff0',
+    axes:[], evolveTo:{}, mutant:null,
+    desc:'Clear as meltwater. Light passes straight through and comes out bent, like through a lens.' }),
+  bonechoir: S({ id:'bonechoir', name:'BONE CHOIR', seed:403, chimera:true, rare:'APEX',
+    body:'flat', tail:'lobe', dorsal:'sail', extra:['spines','plates','whiskers'], pattern:'stripes', pal:PAL.bonechoir,
+    axes:[], evolveTo:{}, mutant:null,
+    desc:'Its plates rub together and hum. Fish do sing - most of them just do it too quietly to hear.' }),
+  orbitcrown: S({ id:'orbitcrown', name:'ORBIT CROWN', seed:404, chimera:true, rare:'APEX',
+    body:'blob', tail:'fan', dorsal:'none', extra:['orb','glow','crown'], pattern:'spots', pal:PAL.orbitcrown, glow:'#63c2e0',
+    axes:[], evolveTo:{}, mutant:null,
+    desc:'The beads doubled and settled into a ring. It moves, they follow, and nobody knows why.' }),
+  prismlance: S({ id:'prismlance', name:'PRISM LANCE', seed:405, chimera:true, rare:'LEGENDARY',
+    body:'slim', tail:'veil', dorsal:'sail', extra:['crystal','glow'], pattern:'neon', pal:PAL.prismlance, glow:'#a894ff',
+    axes:[], evolveTo:{}, mutant:null,
+    desc:'Crystal grew along a glass body and made a blade. It hangs still, then is simply elsewhere.' }),
+  geodewalker: S({ id:'geodewalker', name:'GEODE WALKER', seed:406, chimera:true, rare:'LEGENDARY',
+    body:'flat', tail:'lobe', dorsal:'small', extra:['crystal','plates','whiskers'], pattern:'none', pal:PAL.geode,
+    axes:[], evolveTo:{}, mutant:null,
+    desc:'A crawling stone with a hollow, sparkling back. It ploughs the floor and plants crystals as it goes.' }),
+  stargarden: S({ id:'stargarden', name:'STAR GARDEN', seed:407, chimera:true, rare:'LEGENDARY',
+    body:'disc', tail:'veil', dorsal:'none', extra:['orb','crystal','moss'], pattern:'none', pal:PAL.stargarden, glow:'#78c98e',
+    axes:[], evolveTo:{}, mutant:null,
+    desc:'Algae, crystal and light beads on one animal. A whole tiny ecosystem that swims.' }),
+  ghostfossil: S({ id:'ghostfossil', name:'GHOST FOSSIL', seed:408, chimera:true, rare:'LEGENDARY',
+    body:'slim', tail:'lobe', dorsal:'none', extra:['plates','tendrils'], pattern:'stripes', pal:PAL.ghostfossil,
+    axes:[], evolveTo:{}, mutant:null,
+    desc:'You can see its bones through its skin. It looks like its own fossil, still swimming.' }),
+  cometveil: S({ id:'cometveil', name:'COMET VEIL', seed:409, chimera:true, rare:'LEGENDARY',
+    body:'slim', tail:'veil', dorsal:'sail', extra:['orb','tendrils','glow'], pattern:'neon', pal:PAL.cometveil, glow:'#7fa8f0',
+    axes:[], evolveTo:{}, mutant:null,
+    desc:'It trails a tail of light beads. In a dark tank you see the tail long before the fish.' }),
+  /* ======== SECOND HALF OF THE TREE - each base is unlocked by an achievement ======== */
+  shrimp: S({ id:'shrimp', name:'SHRIMP', base:true, locked:true, seed:501,
+    body:'shrimp', tail:'fan', dorsal:'none', extra:'none', pattern:'stripes', pal:PAL.shrimp, move:'crawl',
+    axes:['ARMOR','FLOW'], evolveTo:{ARMOR:'ironshrimp',FLOW:'dartshrimp'}, mutant:'ghostshrimp',
+    desc:'It walks the floor on ten legs and swims backwards by flicking its tail.' }),
+  ironshrimp: S({ id:'ironshrimp', name:'IRON PRAWN', seed:502,
+    body:'shrimp', tail:'fan', dorsal:'none', extra:['plates','spines'], pattern:'none', pal:PAL.ironshrimp, move:'crawl',
+    axes:['ARMOR'], evolveTo:{}, mutant:'ghostshrimp',
+    desc:'Grit in the water thickened its shell. It moults, and the old armour lies on the floor like a knight.' }),
+  dartshrimp: S({ id:'dartshrimp', name:'DART PRAWN', seed:503,
+    body:'shrimp', tail:'veil', dorsal:'none', extra:'glow', pattern:'neon', pal:PAL.dartshrimp, glow:'#ff86e0', move:'swim',
+    axes:['FLOW'], evolveTo:{}, mutant:'ghostshrimp',
+    desc:'One flick of the tail and it is a hand-span away. It left the floor and took to open water.' }),
+  ghostshrimp: S({ id:'ghostshrimp', name:'GHOST PRAWN', seed:504, mutantOf:'shrimp',
+    body:'shrimp', tail:'veil', dorsal:'none', extra:['crystal','tendrils'], pattern:'none', pal:PAL.ghostshrimp, glow:'#8cf0ff', move:'crawl',
+    axes:['CHIMERA'], evolveTo:{}, mutant:null,
+    desc:'MUTANT. Clear all the way through. You can watch its dinner travel down inside it.' }),
+
+  snail: S({ id:'snail', name:'SNAIL', base:true, locked:true, seed:511,
+    body:'snail', tail:'none', dorsal:'none', extra:'none', pattern:'none', pal:PAL.snail, move:'crawl',
+    axes:['ARMOR','BLOOM'], evolveTo:{ARMOR:'spireshell',BLOOM:'gardensnail'}, mutant:'voidshell',
+    desc:'It carries its house and grows it in a spiral, adding a little more every week of its life.' }),
+  spireshell: S({ id:'spireshell', name:'SPIRE SHELL', seed:512,
+    body:'snail', tail:'none', dorsal:'none', extra:['spines','plates'], pattern:'none', pal:PAL.spireshell, move:'crawl',
+    axes:['ARMOR'], evolveTo:{}, mutant:'voidshell',
+    desc:'The spiral grew towers. Nothing in this tank has a mouth strong enough to crack it.' }),
+  gardensnail: S({ id:'gardensnail', name:'GARDEN SHELL', seed:513,
+    body:'snail', tail:'none', dorsal:'none', extra:['moss','crown'], pattern:'none', pal:PAL.gardensnail, move:'crawl',
+    axes:['BLOOM'], evolveTo:{}, mutant:'voidshell',
+    desc:'A whole meadow rides on its shell. Snail and garden now feed each other.' }),
+  voidshell: S({ id:'voidshell', name:'VOID SHELL', seed:514, mutantOf:'snail',
+    body:'snail', tail:'none', dorsal:'none', extra:['tendrils','glow'], pattern:'none', pal:PAL.voidshell, glow:'#a070ff', move:'crawl',
+    axes:['CHIMERA'], evolveTo:{}, mutant:null,
+    desc:'MUTANT. The shell coils inward and the eye never blinks. Best not to look into the opening.' }),
+
+  jelly: S({ id:'jelly', name:'JELLYFISH', base:true, locked:true, seed:521,
+    body:'bell', tail:'none', dorsal:'none', extra:'none', pattern:'none', pal:PAL.jelly, glow:'#c090ff', move:'drift',
+    axes:['LUMEN','ABYSS'], evolveTo:{LUMEN:'lanternjelly',ABYSS:'deepbell'}, mutant:'glassbell',
+    desc:'No brain, no bones, no heart - and it has outlived every fish family on the planet.' }),
+  lanternjelly: S({ id:'lanternjelly', name:'LANTERN BELL', seed:522,
+    body:'bell', tail:'none', dorsal:'none', extra:['glow','orb'], pattern:'spots', pal:PAL.lanternjelly, glow:'#b0ff60', move:'drift',
+    axes:['LUMEN'], evolveTo:{}, mutant:'glassbell',
+    desc:'It pulses light instead of swimming fast. Predators forget what they were chasing.' }),
+  deepbell: S({ id:'deepbell', name:'DEEP BELL', seed:523,
+    body:'bell', tail:'none', dorsal:'none', extra:['tendrils'], pattern:'none', pal:PAL.deepbell, move:'drift',
+    axes:['ABYSS'], evolveTo:{}, mutant:'glassbell',
+    desc:'It sank into the cold and got slower and slower. One pulse a minute is enough down there.' }),
+  glassbell: S({ id:'glassbell', name:'GLASS BELL', seed:524, mutantOf:'jelly',
+    body:'bell', tail:'none', dorsal:'none', extra:['crystal','glow'], pattern:'none', pal:PAL.glassbell, glow:'#7fffe8', move:'drift',
+    axes:['CHIMERA'], evolveTo:{}, mutant:null,
+    desc:'MUTANT. Almost pure water holding its own shape. You find it by the shimmer, not the shape.' }),
+
+  seahorse: S({ id:'seahorse', name:'SEAHORSE', base:true, locked:true, seed:531,
+    body:'horse', tail:'none', dorsal:'small', extra:'none', pattern:'stripes', pal:PAL.seahorse, move:'hover',
+    axes:['BLOOM','CHIMERA'], evolveTo:{BLOOM:'weedhorse',CHIMERA:'crownhorse'}, mutant:'boneseahorse',
+    desc:'It swims upright and holds on to weeds with its tail. The father carries the eggs, not the mother.' }),
+  weedhorse: S({ id:'weedhorse', name:'WEED HORSE', seed:532,
+    body:'horse', tail:'none', dorsal:'small', extra:['moss'], pattern:'none', pal:PAL.weedhorse, move:'hover',
+    axes:['BLOOM'], evolveTo:{}, mutant:'boneseahorse',
+    desc:'Frills grew until it became a drifting weed. It hides by being scenery.' }),
+  crownhorse: S({ id:'crownhorse', name:'CROWN HORSE', seed:533,
+    body:'horse', tail:'none', dorsal:'sail', extra:['crown','glow'], pattern:'stripes', pal:PAL.crownhorse, glow:'#ff8fd0', move:'hover',
+    axes:['CHIMERA'], evolveTo:{}, mutant:'boneseahorse',
+    desc:'Something in the strange water gave it a crown. It has started acting like it means something.' }),
+  boneseahorse: S({ id:'boneseahorse', name:'BONE HORSE', seed:534, mutantOf:'seahorse',
+    body:'horse', tail:'none', dorsal:'none', extra:['plates','spines'], pattern:'stripes', pal:PAL.boneseahorse, move:'hover',
+    axes:['ARMOR'], evolveTo:{}, mutant:null,
+    desc:'MUTANT. Rings of bone all the way down. It rattles softly when the current moves.' }),
+
+  kingprawn: S({ id:'kingprawn', name:'KING PRAWN', seed:601, chimera:true, rare:'APEX',
+    body:'shrimp', tail:'veil', dorsal:'sail', extra:['plates','spines','crown'], pattern:'stripes', pal:PAL.kingprawn, move:'crawl',
+    axes:[], evolveTo:{}, mutant:null,
+    desc:'Two ghosts made something solid. It walks the floor like it owns the whole garden.' }),
+  cathedral: S({ id:'cathedral', name:'SHELL CATHEDRAL', seed:602, chimera:true, rare:'APEX',
+    body:'snail', tail:'none', dorsal:'none', extra:['spines','crystal','glow'], pattern:'none', pal:PAL.cathedral, glow:'#b0a0ff',
+    move:'crawl', axes:[], evolveTo:{}, mutant:null,
+    desc:'The shell kept spiralling and grew spires and windows. Something still lives inside it.' }),
+  sunjelly: S({ id:'sunjelly', name:'SUN BELL', seed:603, chimera:true, rare:'APEX',
+    body:'bell', tail:'none', dorsal:'none', extra:['glow','orb','crown'], pattern:'spots', pal:PAL.sunjelly, glow:'#fff0c0', move:'drift',
+    axes:[], evolveTo:{}, mutant:null,
+    desc:'Two glass bells folded together and lit up. The tank has its own small sun now.' }),
+  dragonhorse: S({ id:'dragonhorse', name:'DRAGON HORSE', seed:604, chimera:true, rare:'APEX',
+    body:'horse', tail:'none', dorsal:'sail', extra:['crown','spines','glow','tendrils'], pattern:'stripes', pal:PAL.dragonhorse, glow:'#70e8ff',
+    move:'hover', axes:[], evolveTo:{}, mutant:null,
+    desc:'Sail, crown and streamers. The oldest stories about the sea probably started with something like this.' }),
+
+  reliccrown: S({ id:'reliccrown', name:'RELIC CROWN', seed:410, chimera:true, rare:'LEGENDARY',
+    body:'disc', tail:'fan', dorsal:'sail', extra:['orb','spines','crown'], pattern:'stripes', pal:PAL.reliccrown, glow:'#ff86a8',
+    axes:[], evolveTo:{}, mutant:null,
+    desc:'Armour, sail and a ring of light. The oldest thing this garden can grow.' })
+};
+var SPECIES_ORDER = ['guppy','lantern','mossback','prismfry','tetra','dart','ghostneon','glassdart',
+                     'catfish','plated','siltlurker','bonecrawler','angel','sailangel','veilwraith','orbitveil',
+                     'prismbloom','glassseer','bonechoir','orbitcrown',
+                     'prismlance','geodewalker','stargarden','ghostfossil','cometveil','reliccrown',
+                     'shrimp','ironshrimp','dartshrimp','ghostshrimp',
+                     'snail','spireshell','gardensnail','voidshell',
+                     'jelly','lanternjelly','deepbell','glassbell',
+                     'seahorse','weedhorse','crownhorse','boneseahorse',
+                     'kingprawn','cathedral','sunjelly','dragonhorse'];
+/* mutant x mutant -> chimera. Key is the two ids sorted, so order never matters. */
+var CHIMERA_CHANCE = 0.10;
+var CHIMERA = {
+  'prismfry+prismfry':       'prismbloom',
+  'glassdart+glassdart':     'glassseer',
+  'bonecrawler+bonecrawler': 'bonechoir',
+  'orbitveil+orbitveil':     'orbitcrown',
+  'glassdart+prismfry':      'prismlance',
+  'bonecrawler+prismfry':    'geodewalker',
+  'orbitveil+prismfry':      'stargarden',
+  'bonecrawler+glassdart':   'ghostfossil',
+  'glassdart+orbitveil':     'cometveil',
+  'bonecrawler+orbitveil':   'reliccrown',
+  'ghostshrimp+ghostshrimp': 'kingprawn',
+  'voidshell+voidshell':     'cathedral',
+  'glassbell+glassbell':     'sunjelly',
+  'boneseahorse+boneseahorse':'dragonhorse'
+};
+function chimeraKey(x,y){ return x<y ? x+'+'+y : y+'+'+x; }
+var BASE_IDS = ['guppy','tetra','catfish','angel'];          // always available
+var LOCKED_BASE = ['shrimp','jelly','snail','seahorse'];     // earned, see ACHIEVEMENTS
+function availableBase(){
+  var a=BASE_IDS.slice();
+  for(var i=0;i<LOCKED_BASE.length;i++) if(G.unlocked[LOCKED_BASE[i]]) a.push(LOCKED_BASE[i]);
+  return a;
+}
+
+/* ---------- DECOR: the slow lever. Food steers one fish now, decor steers the
+     whole tank forever. Each piece pushes one axis and most of them breathe out oxygen. ---------- */
+var DECOR = [
+  {id:'kelp',    name:'KELP BED',     cost:60,  axis:'BLOOM',   o2:12, w:60,  h:130},
+  {id:'coral',   name:'GLOW CORAL',   cost:90,  axis:'LUMEN',   o2:5,  w:78,  h:80},
+  {id:'grotto',  name:'DARK GROTTO',  cost:80,  axis:'ABYSS',   o2:0,  w:96,  h:66},
+  {id:'crystal', name:'CRYSTAL SPUR', cost:100, axis:'ARMOR',   o2:0,  w:62,  h:86},
+  {id:'vent',    name:'BUBBLE VENT',  cost:70,  axis:'FLOW',    o2:22, w:52,  h:40},
+  {id:'idol',    name:'STRANGE IDOL', cost:140, axis:'CHIMERA', o2:0,  w:44,  h:70}
+];
+var DECOR_MAX = 12;
+var DPAL = {
+  kelp:    ['#0c2a1c','#1a5033','#2f7d47','#57ab5c','#9ee08a'],
+  coral:   ['#3a1030','#6e2050','#a83a78','#e07ab0','#ffd0f0'],
+  grotto:  ['#141920','#2a3540','#465662','#687e8c','#9ab0bc'],
+  crystal: ['#1d2a40','#35507a','#5a7fb0','#9ec4e8','#e6f6ff'],
+  vent:    ['#22262c','#3c444e','#5a6470','#8a94a2','#c2ccd8'],
+  idol:    ['#2a1f14','#4a3826','#6e563a','#9c8058','#d8c090']
+};
+function decorDef(id){ for(var i=0;i<DECOR.length;i++) if(DECOR[i].id===id) return DECOR[i]; return null; }
+
+/* ---------- 8. FOOD ---------- */
+var FOODS = [
+  {id:'flakes', name:'FLAKES',       cost:0,  axis:null,     col:'#e8c06a', desc:'free'},
+  {id:'glow',   name:'GLOW PLANKTON',cost:20, axis:'LUMEN',  col:'#8fe8ff', desc:'light'},
+  {id:'algae',  name:'ALGAE WAFER',  cost:20, axis:'BLOOM',  col:'#7fd05a', desc:'plants'},
+  {id:'grit',   name:'MINERAL GRIT', cost:20, axis:'ARMOR',  col:'#b6b6c2', desc:'armour'},
+  {id:'worm',   name:'BLOODWORM',    cost:20, axis:'FLOW',   col:'#e0525a', desc:'speed'},
+  {id:'krill',  name:'BLACK KRILL',  cost:20, axis:'ABYSS',  col:'#5a4f7a', desc:'deep'}
+];
+
+/* ---------- QUESTS: something to aim at. Auto-claimed, then replaced. ---------- */
+var QUEST_POOL = [
+  {id:'merge12',  text:'MERGE 12 TIMES',           goal:12, reward:60,  ev:'merge'},
+  {id:'merge30',  text:'MERGE 30 TIMES',           goal:30, reward:140, ev:'merge'},
+  {id:'disc2',    text:'DISCOVER 2 NEW SPECIES',   goal:2,  reward:120, ev:'discover'},
+  {id:'l3',       text:'RAISE ANY FISH TO L3',     goal:1,  reward:70,  ev:'l3'},
+  {id:'special8', text:'SERVE SPECIAL FOOD 8 TIMES',goal:8, reward:70,  ev:'special'},
+  {id:'evolve1',  text:'EVOLVE ANY SPECIES',       goal:1,  reward:90,  ev:'evolve'},
+  {id:'mutant1',  text:'CREATE A MUTANT',          goal:1,  reward:110, ev:'mutant'},
+  {id:'cross1',   text:'CROSS TWO MUTANTS',        goal:1,  reward:160, ev:'cross'},
+  {id:'decor3',   text:'PLANT 3 PIECES OF DECOR',  goal:3,  reward:60,  ev:'decor'},
+  {id:'axis',     text:'FILL ONE FISH WITH 40 OF ANY DIET AXIS', goal:1, reward:90, ev:'axis40'}
+];
+function questDef(id){ for(var i=0;i<QUEST_POOL.length;i++) if(QUEST_POOL[i].id===id) return QUEST_POOL[i]; return null; }
+
+/* ---------- ACHIEVEMENTS: the only way to earn the last four base species ---------- */
+var ACHS = [
+  {id:'a_merge20',  text:'MERGE 20 TIMES',        stat:'merges',   goal:20, gives:'shrimp'},
+  {id:'a_mutant',   text:'CREATE YOUR FIRST MUTANT', stat:'mutants', goal:1, gives:'jelly'},
+  {id:'a_merge60',  text:'MERGE 60 TIMES',        stat:'merges',   goal:60, gives:'snail'},
+  {id:'a_chimera',  text:'CROSS TWO MUTANTS INTO A CHIMERA', stat:'chimeras', goal:1, gives:'seahorse'}
+];
+
+/* ---------- 9. RANKS ---------- */
+var RANK_LEN = [50,80,116];
+var RANK_O2  = [6,10,17];
+var AGE_STAGE = ['FRY','JUVENILE','ADULT'];
+
+/* ============================================================
+   CREATURE RENDERER — one function draws every species
+   ============================================================ */
+/* canvas sized per species: a sail needs headroom, a tetra does not (template §11.13) */
+function creatureExtent(sp){
+  var d=bodyDims(sp,1), rx=d[0], ry=d[1];
+  var up=ry+0.10, dn=ry+0.24, lf=rx+0.06, rt=rx+0.10;
+  if(sp.dorsal==='sail')      up=Math.max(up, ry+0.38*1.52+0.05);
+  else if(sp.dorsal==='small')up=Math.max(up, ry+0.24);
+  if(sp.tail==='veil')      lf=Math.max(lf, rx+0.44);
+  else if(sp.tail==='lobe') lf=Math.max(lf, rx+0.24);
+  else                      lf=Math.max(lf, rx+0.34);
+  if(sp.tail==='fork'){ up=Math.max(up, ry+0.30); dn=Math.max(dn, ry+0.30); }
+  if(sp.tail==='veil'){ up=Math.max(up, ry+0.28); dn=Math.max(dn, ry+0.28); }
+  if(sp.tail==='fan'){  up=Math.max(up, ry+0.22); dn=Math.max(dn, ry+0.22); }
+  var EX=extrasOf(sp);
+  if(EX.indexOf('tendrils')>=0) lf=Math.max(lf, rx+0.46);
+  if(EX.indexOf('whiskers')>=0) rt=Math.max(rt, rx+0.36);
+  if(EX.indexOf('spines')>=0||EX.indexOf('crystal')>=0||EX.indexOf('moss')>=0) up=Math.max(up, ry+0.26);
+  if(EX.indexOf('crown')>=0){ rt=Math.max(rt, rx+0.16); up=Math.max(up, ry+0.20); dn=Math.max(dn, ry+0.20); }
+  if(EX.indexOf('orb')>=0){
+    rt=Math.max(rt, rx*1.15+0.08); lf=Math.max(lf, rx*1.15+0.08);
+    up=Math.max(up, ry*1.5+0.08);  dn=Math.max(dn, ry*1.5+0.08);
+  }
+  if(sp.body==='snail'){ up=Math.max(up, ry+0.30); rt=Math.max(rt, rx+0.30); dn=Math.max(dn, ry+0.14); }
+  if(sp.body==='bell'){ dn=Math.max(dn, ry+0.62); lf=Math.max(lf, rx+0.16); rt=Math.max(rt, rx+0.16); }
+  if(sp.body==='horse'){ up=Math.max(up, ry+0.26); rt=Math.max(rt, rx+0.34); lf=Math.max(lf, rx+0.40); dn=Math.max(dn, ry+0.20); }
+  if(sp.body==='shrimp'){ rt=Math.max(rt, rx+0.46); dn=Math.max(dn, ry+0.32); up=Math.max(up, ry+0.20); }
+  dn=Math.max(dn, ry+0.26); // pectoral fin
+  return { hx:Math.max(lf,rt), hy:Math.max(up,dn) };
+}
+function creatureCanvasSize(sp,rank){
+  var L=RANK_LEN[rank], e=creatureExtent(sp);
+  return { w: Math.round(e.hx*2*L)+8, h: Math.round(e.hy*2*L)+8 };
+}
+function extrasOf(sp){
+  if(Array.isArray(sp.extra)) return sp.extra;
+  return (sp.extra && sp.extra!=='none') ? [sp.extra] : [];
+}
+function bodyDims(sp,L){
+  switch(sp.body){
+    case 'shrimp': return [L*0.38,L*0.22];
+    case 'snail':  return [L*0.34,L*0.24];
+    case 'bell':   return [L*0.30,L*0.28];
+    case 'horse':  return [L*0.17,L*0.40];
+    case 'slim':   return [L*0.46,L*0.17];
+    case 'flat':   return [L*0.44,L*0.21];
+    case 'disc':   return [L*0.32,L*0.36];
+    case 'blob':   return [L*0.34,L*0.33];
+    default:       return [L*0.42,L*0.26];
+  }
+}
+function drawCreature(c,sp,rank,frame){
+  var L = RANK_LEN[rank];
+  var sz = creatureCanvasSize(sp,rank);
+  var cx = sz.w>>1, cy = sz.h>>1;
+  var P = sp.pal;
+  var rnd = mulberry32(sp.seed*31 + rank*7 + 3);
+  var d = bodyDims(sp,L), rx = d[0], ry = d[1];
+  var ph = frame/FRAMES*Math.PI*2;
+  var sway = Math.sin(ph);
+  var flex = Math.round(Math.cos(ph)*Math.max(1,L*0.02));
+  var x0 = Math.round(cx-rx);   // tail root
+  var detail = rank;            // higher rank = richer
+
+  /* --- tail (behind body) --- */
+  if(sp.tail!=='none'){
+  var tlen = (sp.tail==='veil') ? L*0.40 : (sp.tail==='lobe' ? L*0.20 : L*0.28);
+  var off  = sway*L*0.10;
+  if(sp.tail==='fork'){
+    wedge(c,x0+1,cy,tlen+1,off-L*0.22,3,3,P[0]); wedge(c,x0+1,cy,tlen+1,off+L*0.22,3,3,P[0]);
+    wedge(c,x0,cy,tlen,off-L*0.22,2,2,P[1]);     wedge(c,x0,cy,tlen,off+L*0.22,2,2,P[1]);
+    wedge(c,x0-1,cy-1,tlen-2,off-L*0.20,1,1,P[2]); wedge(c,x0-1,cy-1,tlen-2,off+L*0.20,1,1,P[2]);
+  } else {
+    var half = (sp.tail==='veil') ? L*0.34 : (sp.tail==='lobe' ? L*0.16 : L*0.26);
+    tri(c,x0+1,cy,tlen,half,off,P[0],1);
+    tri(c,x0,cy,tlen,half,off,P[1],0);
+    tri(c,x0-1,cy-1,tlen-2,half*0.7,off,P[2],0);
+    if(detail>0) tri(c,x0-2,cy-2,tlen-4,half*0.42,off,P[3],0);
+  }
+  }
+
+  /* --- dorsal fin --- */
+  if(sp.dorsal==='sail'){
+    var sh = Math.round(L*0.38);
+    tri(c,cx+Math.round(rx*0.35),cy-ry-1,rx*0.9,sh,-sh*0.5,P[0],1);
+    tri(c,cx+Math.round(rx*0.35),cy-ry-1,rx*0.9,sh,-sh*0.5,P[1],0);
+    tri(c,cx+Math.round(rx*0.30),cy-ry-2,rx*0.7,sh*0.6,-sh*0.45,P[2],0);
+  } else if(sp.dorsal==='small'){
+    tri(c,cx+Math.round(rx*0.1),cy-ry,rx*0.5,L*0.12,-L*0.10,P[0],1);
+    tri(c,cx+Math.round(rx*0.1),cy-ry,rx*0.5,L*0.12,-L*0.10,P[1],0);
+  }
+
+  /* --- body: outline / base / light / highlight (PIXEL_ART_SPEC §4).
+         Four anatomies are not fish at all and get their own silhouette. --- */
+  var by = cy+flex, i2;
+  if(sp.body==='snail'){
+    /* a foot on the floor and a spiral shell above it */
+    var fy=by+Math.round(ry*0.7);
+    rp(c,cx-rx-1,fy-1,rx*2+2,Math.round(ry*0.5)+2,P[0]);
+    rp(c,cx-rx,fy,rx*2,Math.round(ry*0.5),P[1]);
+    rp(c,cx-rx+1,fy+1,rx*2-3,Math.max(1,Math.round(ry*0.28)),P[2]);
+    for(i2=0;i2<Math.round(rx*1.6);i2++) px(c,cx-rx+2+i2,fy+Math.round(ry*0.5)+Math.round(Math.sin(i2*0.9+ph)*1.2),P[0]);
+    var sr=Math.round(ry*1.05), scx=cx-Math.round(rx*0.15), scy=by-Math.round(ry*0.35);
+    circ(c,scx,scy,sr+1,P[0]); circ(c,scx,scy,sr,P[1]);
+    for(i2=0;i2<3;i2++){                                  // the spiral
+      var rr=Math.round(sr*(0.74-i2*0.20));
+      var ox2=Math.round(Math.cos(i2*2.1)*sr*0.22), oy2=Math.round(Math.sin(i2*2.1)*sr*0.22);
+      circ(c,scx+ox2,scy+oy2,rr,i2%2?P[2]:P[3]);
+      circ(c,scx+ox2,scy+oy2,Math.max(1,rr-2),i2%2?P[3]:P[2]);
+    }
+    circ(c,scx-Math.round(sr*0.3),scy-Math.round(sr*0.35),Math.max(1,Math.round(sr*0.16)),P[4]);
+  } else if(sp.body==='bell'){
+    /* a pulsing dome with a curtain underneath - no fish parts at all */
+    var pul=Math.round(Math.sin(ph)*L*0.03);
+    var brx=rx+pul, bry=ry-pul;
+    dome(c,cx,by+bry,brx+1,bry*2+1,P[0]);
+    dome(c,cx,by+bry,brx,bry*2,P[1]);
+    dome(c,cx-1,by+bry-1,brx-3,bry*2-3,P[2]);
+    dome(c,cx-2,by+bry-3,Math.round(brx*0.5),Math.round(bry*1.1),P[3]);
+    rp(c,cx-brx,by+bry,brx*2+1,2,P[0]);
+    for(i2=-3;i2<=3;i2++){                                 // the curtain
+      var tx2=cx+Math.round(i2*brx*0.28);
+      var tl2=Math.round(L*(0.30+Math.abs(Math.sin(i2+ph))*0.16));
+      for(var q2=0;q2<tl2;q2++){
+        var wq=Math.round(Math.sin(q2*0.3+ph+i2)*L*0.035);
+        px(c,tx2+wq,by+bry+2+q2, q2%4===0?P[4]:P[1]);
+        if(detail>0) px(c,tx2+wq+1,by+bry+2+q2,P[0]);
+      }
+    }
+  } else if(sp.body==='horse'){
+    /* upright body, snout forward, tail curled under */
+    var seg=Math.round(ry*0.34);
+    for(i2=-2;i2<=2;i2++){
+      var syy=by+i2*seg, sxx=cx+Math.round(Math.sin(i2*0.7)*rx*0.5);
+      var swd=rx+ (i2===-2?-1:0);
+      ell(c,sxx,syy,swd+1,seg,P[0]);
+      ell(c,sxx,syy,swd,seg-1,P[1]);
+      ell(c,sxx-1,syy-1,Math.max(1,swd-2),Math.max(1,seg-2),P[2]);
+      if(detail>0) px(c,sxx-1,syy-1,P[3]);
+    }
+    var hx2=cx+Math.round(Math.sin(-2*0.7)*rx*0.5), hy2=by-2*seg;
+    ell(c,hx2,hy2-seg,rx+1,seg+2,P[0]); ell(c,hx2,hy2-seg,rx,seg+1,P[1]);
+    rp(c,hx2,hy2-seg-1,Math.round(rx*2.0),3,P[0]);            // snout
+    rp(c,hx2,hy2-seg-1,Math.round(rx*1.8),1,P[3]);
+    var tcx=cx+Math.round(Math.sin(2*0.7)*rx*0.5), tcy=by+2*seg;
+    for(i2=0;i2<Math.round(L*0.34);i2++){                     // curled tail
+      var an=i2*0.30+ph*0.2;
+      px(c,tcx-Math.round(Math.cos(an)*i2*0.42), tcy+Math.round(Math.sin(an)*i2*0.30)+Math.round(i2*0.30), P[0]);
+      px(c,tcx-Math.round(Math.cos(an)*i2*0.42), tcy+Math.round(Math.sin(an)*i2*0.30)+Math.round(i2*0.30)-1, P[2]);
+    }
+  } else if(sp.body==='shrimp'){
+    /* arched, segmented, legs under, antennae forward */
+    for(i2=-3;i2<=3;i2++){
+      var ax2=cx+Math.round(i2*rx*0.30);
+      var arch=Math.round(Math.cos(i2*0.42)*ry*0.55);
+      var sry=Math.round(ry*(0.95-Math.abs(i2)*0.10));
+      ell(c,ax2,by-arch,Math.round(rx*0.22)+1,sry+1,P[0]);
+      ell(c,ax2,by-arch,Math.round(rx*0.22),sry,P[1]);
+      ell(c,ax2-1,by-arch-1,Math.max(1,Math.round(rx*0.16)),Math.max(1,sry-2),P[2]);
+      if(detail>0) rp(c,ax2-1,by-arch-sry+1,1,Math.max(1,sry),P[3]);
+      for(var lg=0;lg<2;lg++){                                // legs
+        var lx2=ax2, ly2=by-arch+sry;
+        for(var lp=0;lp<Math.round(L*0.11);lp++)
+          px(c,lx2+Math.round(Math.sin(lp*0.5+i2+ph)*2)-lg, ly2+lp, P[0]);
+      }
+    }
+    var hxx=cx+Math.round(3*rx*0.30);
+    for(i2=0;i2<Math.round(L*0.40);i2++){                      // antennae
+      px(c,hxx+i2, by-Math.round(ry*0.4)-Math.round(Math.sin(i2*0.16+ph)*L*0.05), P[0]);
+      px(c,hxx+i2, by-Math.round(ry*0.1)+Math.round(i2*0.16), P[0]);
+    }
+  } else {
+    ell(c,cx,by,rx+1,ry+1,P[0]);
+    ell(c,cx,by,rx,ry,P[1]);
+    ell(c,cx-1,by-1,rx-2,ry-2,P[2]);
+    if(detail>0) ell(c,cx-2,by-2,rx-4,ry-4,P[3]);
+    if(sp.body==='flat'){ rp(c,cx-rx,by+ry-1,rx*2,2,P[1]); rp(c,cx-rx,by+ry,rx*2,1,P[0]); }
+  }
+  var oddBody = (sp.body==='snail'||sp.body==='bell'||sp.body==='horse'||sp.body==='shrimp');
+
+  /* --- pectoral fin --- */
+  if(!oddBody){
+    tri(c,cx+Math.round(rx*0.2),by+Math.round(ry*0.4),L*0.20,L*0.09,L*0.06+sway*2,P[0],1);
+    tri(c,cx+Math.round(rx*0.2),by+Math.round(ry*0.4),L*0.20,L*0.09,L*0.06+sway*2,P[2],0);
+  }
+
+  /* --- pattern --- */
+  var i,t;
+  if(sp.pattern==='stripes'){
+    for(i=-2;i<=2;i++){
+      var sx = Math.round(cx+i*rx*0.34);
+      var sHalf = Math.round(ry*Math.sqrt(Math.max(0,1-Math.pow((sx-cx)/rx,2))));
+      if(sHalf>1) rp(c,sx,by-sHalf+1,Math.max(1,Math.round(L*0.035)),sHalf*2-2,P[0]);
+    }
+  } else if(sp.pattern==='spots'){
+    for(i=0;i<10+detail*6;i++){
+      var a=rnd()*6.283, r=Math.sqrt(rnd());
+      var qx=Math.round(cx+Math.cos(a)*rx*r*0.8), qy=Math.round(by+Math.sin(a)*ry*r*0.8);
+      rp(c,qx,qy,Math.max(1,Math.round(L*0.05)),Math.max(1,Math.round(L*0.05)), rnd()<0.5?P[0]:P[4]);
+    }
+  } else if(sp.pattern==='neon'){
+    rp(c,cx-rx+2,by-1,rx*2-4,Math.max(1,Math.round(L*0.055)),P[4]);
+    rp(c,cx-rx+2,by+Math.round(ry*0.45),rx*2-6,Math.max(1,Math.round(L*0.045)),P[3]);
+  }
+
+  /* --- extras: what makes a branch a real branch, not a recolour (template §8).
+         A species may STACK several - that is how chimeras get their own silhouette. --- */
+  function drawExtra(kind){
+    var i;
+    if(kind==='glow'){
+      for(i=0;i<4+detail*2;i++){
+        var gx=Math.round(cx-rx*0.6+i*(rx*1.2)/(4+detail*2));
+        rp(c,gx,by+Math.round(ry*0.45),Math.max(1,Math.round(L*0.05)),Math.max(1,Math.round(L*0.05)),P[4]);
+      }
+    } else if(kind==='moss'){
+      for(i=0;i<6+detail*3;i++){
+        var mx=Math.round(cx-rx*0.7+rnd()*rx*1.4);
+        var mh=Math.max(2,Math.round(L*(0.06+rnd()*0.10)));
+        var mHalf=Math.round(ry*Math.sqrt(Math.max(0,1-Math.pow((mx-cx)/rx,2))));
+        rp(c,mx,by-mHalf-mh,1,mh,P[0]);
+        rp(c,mx,by-mHalf-mh,1,Math.max(1,mh-1),P[4]);
+      }
+    } else if(kind==='plates'){
+      for(i=-2;i<=2;i++){
+        var pxx=Math.round(cx+i*rx*0.36);
+        var pHalf=Math.round(ry*Math.sqrt(Math.max(0,1-Math.pow((pxx-cx)/rx,2))));
+        if(pHalf>1){ rp(c,pxx-1,by-pHalf,2,pHalf+1,P[0]); rp(c,pxx,by-pHalf+1,1,pHalf,P[3]); }
+      }
+    } else if(kind==='whiskers'){
+      for(i=0;i<Math.round(L*0.30);i++){
+        rp(c,cx+Math.round(rx*0.85)+i,by+Math.round(ry*0.3)+Math.round(i*0.45+sway),1,1,P[0]);
+        rp(c,cx+Math.round(rx*0.85)+i,by+Math.round(ry*0.1)-Math.round(i*0.25-sway),1,1,P[0]);
+      }
+    } else if(kind==='tendrils'){
+      for(var k=0;k<3;k++){
+        var ty=by+Math.round((k-1)*ry*0.7);
+        for(i=0;i<Math.round(L*0.36);i++){
+          var wob=Math.round(Math.sin(i*0.4+ph+k)*L*0.05);
+          rp(c,x0-i-2,ty+wob,1,1, i%3===0?P[4]:P[1]);
+        }
+      }
+    } else if(kind==='spines'){
+      for(i=-2;i<=2;i++){
+        var qx2=Math.round(cx+i*rx*0.3);
+        var qHalf=Math.round(ry*Math.sqrt(Math.max(0,1-Math.pow((qx2-cx)/rx,2))));
+        var shh=Math.max(2,Math.round(L*0.11));
+        tri(c,qx2,by-qHalf,shh,1,-shh,P[0],0);
+        rp(c,qx2,by-qHalf-shh,1,shh,P[3]);
+      }
+    } else if(kind==='crystal'){
+      for(i=0;i<4+detail*2;i++){
+        var ax=Math.round(cx-rx*0.6+rnd()*rx*1.2);
+        var aHalf=Math.round(ry*Math.sqrt(Math.max(0,1-Math.pow((ax-cx)/rx,2))));
+        var ah=Math.max(2,Math.round(L*(0.08+rnd()*0.10)));
+        tri(c,ax+1,by-aHalf,ah,2,-ah,P[0],0);
+        tri(c,ax,by-aHalf-1,ah-1,1,-ah,P[4],0);
+      }
+    } else if(kind==='orb'){
+      for(i=0;i<5;i++){
+        var oa=ph+i*1.25, orr=rx*1.15;
+        var ox=Math.round(cx+Math.cos(oa)*orr), oy=Math.round(by+Math.sin(oa)*ry*1.5);
+        circ(c,ox,oy,Math.max(1,Math.round(L*0.045)),P[0]);
+        circ(c,ox,oy,Math.max(1,Math.round(L*0.03)),P[4]);
+      }
+    } else if(kind==='crown'){
+      /* chimera only: a ring of spikes around the head */
+      for(i=0;i<7;i++){
+        var ca=-1.6+i*0.45;
+        var hx=Math.round(cx+rx*0.45+Math.cos(ca)*rx*0.55);
+        var hy=Math.round(by+Math.sin(ca)*ry*0.9);
+        var chh=Math.max(2,Math.round(L*0.09));
+        tri(c,hx+1,hy,chh,2,-chh*0.9,P[0],0);
+        tri(c,hx,hy-1,chh-1,1,-chh*0.9,P[3],0);
+      }
+    }
+  }
+  var EX=extrasOf(sp);
+  for(var e=0;e<EX.length;e++) drawExtra(EX[e]);
+
+  /* --- eye --- */
+  var ex=Math.round(cx+rx*0.58), ey=Math.round(by-ry*0.22);
+  if(sp.body==='snail'){ ex=Math.round(cx+rx*0.85); ey=Math.round(by+ry*0.45); }
+  else if(sp.body==='bell'){ ex=Math.round(cx-rx*0.35); ey=Math.round(by+ry*0.15); }
+  else if(sp.body==='horse'){ ex=Math.round(cx+rx*0.4); ey=Math.round(by-ry*0.72); }
+  else if(sp.body==='shrimp'){ ex=Math.round(cx+rx*0.78); ey=Math.round(by-ry*0.30); }
+  var er=Math.max(1,Math.round(L*0.055));
+  if(sp.id==='siltlurker'){
+    circ(c,ex,ey,er,P[0]); // blind: sealed socket
+  } else {
+    circ(c,ex,ey,er+1,P[0]);
+    circ(c,ex,ey,er,'#f2fbff');
+    circ(c,ex+Math.max(1,Math.round(er*0.3)),ey,Math.max(1,Math.round(er*0.55)),'#101820');
+    if(er>1) px(c,ex-1,ey-1,'#ffffff');
+  }
+  /* --- mouth --- */
+  if(!oddBody) rp(c,cx+Math.round(rx*0.86),by+Math.round(ry*0.12),Math.max(1,Math.round(L*0.06)),1,P[0]);
+
+  /* --- texture (PIXEL_ART_SPEC §4.5) --- */
+  var n = 20+detail*6;
+  for(i=0;i<n;i++){
+    var a2=rnd()*6.283, r2=Math.sqrt(rnd())*0.85;
+    var tx=Math.round(cx+Math.cos(a2)*rx*r2), ty2=Math.round(by+Math.sin(a2)*ry*r2);
+    px(c,tx,ty2, rnd()<0.5?P[1]:P[3]);
+  }
+}
+
+/* ---------- target ring: a DASHED OUTLINE, deliberately unlike any soft creature halo.
+     Baked once at start - never generated inside the game loop (PIXEL_ART_SPEC §7). ---------- */
+function makeRing(r,th,col,dashes){
+  var sz=r*2+3;
+  return makeSprite(sz,sz,function(c,w,h){
+    var cx=w>>1, cy=h>>1, ri=r-th;
+    for(var y=-r;y<=r;y++){
+      for(var x=-r;x<=r;x++){
+        var d2=x*x+y*y;
+        if(d2>r*r || d2<ri*ri) continue;
+        var seg=Math.floor(((Math.atan2(y,x)+Math.PI)/(Math.PI*2))*dashes*2);
+        if(seg%2===0) px(c,cx+x,cy+y,col);
+      }
+    }
+  });
+}
+
+/* ---------- glow halo (separate additive layer, never inside silhouette) ---------- */
+function makeGlow(r,col){
+  return makeSprite(r*2+2,r*2+2,function(c,w,h){
+    var cx=w>>1, cy=h>>1;
+    for(var i=r;i>=1;i--){
+      var a=Math.pow(1-i/r,2)*0.5;
+      c.fillStyle='rgba('+col+','+a.toFixed(3)+')';
+      circ(c,cx,cy,i,'rgba('+col+','+a.toFixed(3)+')');
+    }
+  });
+}
+
+/* ============================================================
+   ASSET BAKE
+   ============================================================ */
+var SPR = { fish:{}, glow:{}, ring:{}, decor:{}, food:{}, bg:null, far:null, mid:null, floorL:null,
+            front:null, rays:null, glass:null, caustic:[], plantsMid:[], egg:null };
+
+/* Sprites are baked on FIRST USE, not all at boot. With 46 species x 3 ranks x 6 frames
+   an eager bake would be ~830 canvases and well over 50 MB on a phone. */
+function fishFrames(id,rank){
+  var sp=SPECIES[id];
+  if(!sp){ sp=SPECIES.guppy; id='guppy'; }              // render must never crash
+  rank=Math.max(0,Math.min(2,rank|0));
+  var byId=SPR.fish[id] || (SPR.fish[id]=[]);
+  if(byId[rank]) return byId[rank];
+  var arr=[], sz=creatureCanvasSize(sp,rank);
+  for(var f=0;f<FRAMES;f++){
+    (function(f){ arr.push(makeSprite(sz.w,sz.h,function(c){ drawCreature(c,sp,rank,f); })); })(f);
+  }
+  byId[rank]=arr;
+  return arr;
+}
+function fishGlow(id){
+  var sp=SPECIES[id];
+  if(!sp || !sp.glow) return null;
+  if(SPR.glow[id]===undefined) SPR.glow[id]=makeGlow(Math.round(RANK_LEN[2]*0.55),hexToRgb(sp.glow));
+  return SPR.glow[id];
+}
+function hexToRgb(h){
+  var n=parseInt(h.slice(1),16);
+  return ((n>>16)&255)+','+((n>>8)&255)+','+(n&255);
+}
+
+function bakeFood(){
+  for(var i=0;i<FOODS.length;i++){
+    (function(f){
+      SPR.food[f.id]=makeSprite(6,6,function(c){
+        circ(c,3,3,2,'#1a1208'); circ(c,3,3,1,f.col); px(c,2,2,'#ffffff');
+      });
+    })(FOODS[i]);
+  }
+  SPR.egg = makeSprite(10,12,function(c){
+    ell(c,5,6,4,5,'#0e2a33'); ell(c,5,6,3,4,'#4fb0a8'); ell(c,4,5,2,3,'#9ff0e0'); px(c,3,4,'#ffffff');
+  });
+}
+
+/* water background: value noise + dithering, no flat fills (PIXEL_ART_SPEC §5) */
+var WATER = ['#0a3341','#0f4a59','#156373','#1d808e','#269dab'];
+function bakeBackground(){
+  var rnd=mulberry32(0xA11CE), wv=makeWaves(rnd,4);
+  SPR.bg = makeSprite(W,H,function(c){
+    var B=3;
+    for(var y=0;y<H;y+=B){
+      for(var x=0;x<W;x+=B){
+        var depth = 1 - (y/H);                 // brighter near surface
+        var n = noise(wv,x,y)*0.22 + (rnd()-0.5)*0.14;  // dithering
+        var v = depth*1.5 + n - 0.35;
+        var s = step(v*2-1,WATER.length);
+        rp(c,x,y,Math.min(B,W-x),B,WATER[s]);
+      }
+    }
+    // surface band
+    for(var x2=0;x2<W;x2++){
+      var hh = 2 + Math.round(Math.sin(x2*0.05)*1.5 + Math.sin(x2*0.017)*1.5);
+      rp(c,x2,SURFACE-6+hh,1,3,'#3ab4c0');
+      rp(c,x2,SURFACE-3+hh,1,2,'#7fe0e0');
+    }
+  });
+}
+function bakeLayer(seedv,topY,tones,amp,mode){
+  var rnd=mulberry32(seedv), wv=makeWaves(rnd,3);
+  return makeSprite(W,H,function(c){
+    var B = (mode==='far')?3:2;
+    for(var x=0;x<W;x+=B){
+      var hgt = topY + noise(wv,x*2,0)*amp;
+      for(var y=Math.round(hgt);y<FLOOR+40;y+=B){
+        var n=noise(wv,x,y)*0.5+(rnd()-0.5)*0.14;
+        var s=step(n,tones.length);
+        rp(c,x,y,Math.min(B,W-x),Math.min(B,FLOOR+40-y),tones[s]);
+      }
+    }
+  });
+}
+function bakeFloor(){
+  var rnd=mulberry32(0xF1007), wv=makeWaves(rnd,4);
+  var T=['#2a3f4a','#3e606d','#57808b','#78a0a8'];
+  SPR.floorL = makeSprite(W,H-FLOOR+8,function(c,w,h){
+    for(var y=0;y<h;y+=2){
+      for(var x=0;x<W;x+=2){
+        var n=noise(wv,x,y)*0.7+(rnd()-0.5)*0.14 - (y/h)*0.5;
+        rp(c,x,y,Math.min(2,W-x),Math.min(2,h-y),T[step(n,T.length)]);
+      }
+    }
+    // pebbles / debris ~150 per screen (PIXEL_ART_SPEC §5)
+    for(var i=0;i<170;i++){
+      var r=2+Math.round(rnd()*3);
+      var px2=Math.round(r+1+rnd()*(W-2*r-2)), py=Math.round(r+1+rnd()*(h-2*r-2));
+      circ(c,px2,py,r+1,T[0]); circ(c,px2,py,r,T[2]); px(c,px2-1,py-1,T[3]);
+    }
+  });
+}
+function bakeKelp(){
+  for(var k=0;k<4;k++){
+    (function(k){
+      var rnd=mulberry32(0x4E19+k), hgt=200+Math.round(rnd()*180);
+      SPR.plantsMid.push(makeSprite(72,hgt,function(c,w,h){
+        var G=['#0c2a1c','#1a5033','#2f7d47','#57ab5c'];
+        var cx=36;
+        for(var y=h-1;y>=0;y--){
+          var t=1-y/h;
+          var xoff=Math.round(Math.sin(t*3+k)*13);
+          var wd=Math.max(3,Math.round(11-t*5));
+          rp(c,cx+xoff-wd-1,y,wd*2+2,1,G[0]);
+          rp(c,cx+xoff-wd,y,wd*2,1,G[1]);
+          rp(c,cx+xoff-wd+1,y,Math.max(1,wd),1,G[2]);
+          if(y%7===0) rp(c,cx+xoff-wd+1,y,1,1,G[3]);
+        }
+      }));
+    })(k);
+  }
+}
+function bakeRays(){
+  SPR.rays = makeSprite(W,H,function(c){
+    var rnd=mulberry32(0x2A45);
+    for(var i=0;i<7;i++){
+      var x=Math.round(rnd()*W), wd=14+Math.round(rnd()*26);
+      for(var y=SURFACE;y<FLOOR;y+=2){
+        var t=(y-SURFACE)/(FLOOR-SURFACE);
+        var a=(1-t)*0.055;
+        var xx=Math.max(0,Math.round(x+t*80));
+        if(xx>=W) continue;
+        var ww=Math.max(1,Math.min(Math.round(wd*(1+t*0.6)),W-xx));
+        c.fillStyle='rgba(150,240,255,'+a.toFixed(3)+')';
+        c.fillRect(xx,y,ww,2);
+      }
+    }
+  });
+}
+function bakeCaustic(){
+  var rnd=mulberry32(0xCA05), wv=makeWaves(rnd,3);
+  for(var f=0;f<6;f++){
+    (function(f){
+      SPR.caustic.push(makeSprite(W,80,function(c,w,h){
+        for(var y=0;y<h;y+=2){
+          for(var x=0;x<W;x+=2){
+            var n=noise(wv,x+f*22,y*3);
+            if(n>0.42){
+              var a=((n-0.42)*1.6*(1-y/h)).toFixed(3);
+              c.fillStyle='rgba(180,255,240,'+a+')';
+              c.fillRect(x,y,Math.min(2,W-x),2);
+            }
+          }
+        }
+      }));
+    })(f);
+  }
+}
+function bakeFront(){
+  var rnd=mulberry32(0xF2007), wv=makeWaves(rnd,2);
+  SPR.front = makeSprite(W,H,function(c){
+    for(var i=0;i<5;i++){
+      var bx=Math.round(rnd()*W), bh=200+Math.round(rnd()*220);
+      for(var y=H-2;y>H-bh;y-=2){
+        var t=(H-y)/bh, wd=Math.max(5,Math.round(26-t*18));
+        var xo=Math.round(Math.sin(t*4+i)*12);
+        var lx=Math.max(0,bx+xo-wd), rw=Math.min(wd*2,W-lx);
+        if(rw>0) rp(c,lx,y,rw,2,'#08303c');
+      }
+    }
+    noise(wv,0,0);
+  });
+}
+function bakeGlass(){
+  SPR.glass = makeSprite(W,H,function(c){
+    var F='#0a1a22', F2='#20505e';
+    rp(c,0,0,W,SURFACE-8,'#061018');
+    rp(c,0,SURFACE-9,W,2,F2);
+    rp(c,0,0,8,H,F); rp(c,W-8,0,8,H,F);
+    rp(c,8,0,2,H,F2); rp(c,W-10,0,2,H,F2);
+    rp(c,0,H-8,W,8,F); rp(c,0,H-10,W,2,F2);
+    // vignette
+    for(var i=0;i<70;i++){
+      var a=(i/70)*0.5;
+      c.fillStyle='rgba(2,10,16,'+(0.014).toFixed(3)+')';
+      c.fillRect(i,i,W-i*2,1); c.fillRect(i,H-1-i,W-i*2,1);
+      c.fillRect(i,i,1,H-i*2); c.fillRect(W-1-i,i,1,H-i*2);
+      if(a<0){}
+    }
+    // glass highlight streaks
+    for(var k=0;k<3;k++){
+      var x=60+k*300;
+      for(var y=SURFACE;y<H-20;y++){
+        c.fillStyle='rgba(200,255,255,0.025)';
+        c.fillRect(x+Math.round(y*0.12),y,6,1);
+      }
+    }
+  });
+}
+function drawDecor(c,id,w,h,seed){
+  var P=DPAL[id], rnd=mulberry32(seed), i, base=h-1, cx=w>>1;
+  if(id==='kelp'){
+    for(var b=0;b<3;b++){
+      var bx=14+b*16, lean=(rnd()*2-1)*8, top=Math.round(h*(0.10+rnd()*0.14));
+      for(var y=base;y>=top;y--){
+        var t=(base-y)/(base-top), xo=Math.round(Math.sin(t*3+b)*6+lean*t);
+        var wd=Math.max(2,Math.round(6-t*3));
+        rp(c,bx+xo-wd-1,y,wd*2+2,1,P[0]);
+        rp(c,bx+xo-wd,y,wd*2,1,P[1]);
+        rp(c,bx+xo-wd+1,y,Math.max(1,wd),1,P[2]);
+        if(y%9===0) px(c,bx+xo-wd+1,y,P[4]);
+      }
+    }
+  } else if(id==='coral'){
+    for(i=0;i<5;i++){
+      var ccx=12+i*13, ch2=Math.round(h*(0.40+rnd()*0.42)), bend=(rnd()*2-1)*5;
+      for(var y2=base;y2>base-ch2;y2--){
+        var t2=(base-y2)/ch2, xo2=Math.round(Math.sin(t2*3+i)*4+bend*t2);
+        var wd2=Math.max(2,Math.round(5-t2*3));
+        rp(c,ccx+xo2-wd2,y2,wd2*2,1,P[0]);
+        rp(c,ccx+xo2-wd2+1,y2,Math.max(1,wd2*2-2),1,P[2]);
+        if(y2%5===0) px(c,ccx+xo2,y2,P[4]);
+      }
+      var tipx=ccx+Math.round(Math.sin(3)*4+bend), tipy=base-ch2;
+      circ(c,tipx,tipy,3,P[0]); circ(c,tipx,tipy,2,P[3]); px(c,tipx,tipy-1,P[4]);
+    }
+  } else if(id==='grotto'){
+    dome(c,cx,base,Math.round(w*0.48),h-2,P[0]);
+    dome(c,cx,base,Math.round(w*0.45),h-4,P[1]);
+    dome(c,cx-2,base,Math.round(w*0.38),h-9,P[2]);
+    dome(c,cx-4,base,Math.round(w*0.26),h-16,P[3]);
+    dome(c,cx,base,Math.round(w*0.20),Math.round(h*0.62),P[0]);
+    dome(c,cx,base,Math.round(w*0.17),Math.round(h*0.58),'#05161d');   // the mouth of the cave
+    for(i=0;i<26;i++) px(c,Math.round(2+rnd()*(w-4)),Math.round(base-rnd()*(h-6)), rnd()<0.5?P[1]:P[4]);
+  } else if(id==='crystal'){
+    for(i=0;i<4;i++){
+      var sx=10+i*13, sh2=Math.round(h*(0.35+rnd()*0.58)), sw=3+Math.round(rnd()*3);
+      var lean2=(rnd()*2-1)*5;
+      spike(c,sx,base,sw+1,sh2,lean2,P[0]);
+      spike(c,sx,base-1,sw,sh2-2,lean2,P[2]);
+      spike(c,sx-1,base-2,Math.max(1,sw-2),sh2-5,lean2,P[3]);
+      px(c,sx,base-sh2+2,P[4]);
+    }
+  } else if(id==='vent'){
+    dome(c,cx,base,Math.round(w*0.48),h-2,P[0]);
+    dome(c,cx,base,Math.round(w*0.44),h-4,P[1]);
+    dome(c,cx-2,base,Math.round(w*0.34),h-9,P[2]);
+    dome(c,cx,base,4,Math.round(h*0.55),P[0]);
+    dome(c,cx,base,3,Math.round(h*0.50),'#0a1c24');
+    for(i=0;i<14;i++) px(c,Math.round(2+rnd()*(w-4)),Math.round(base-rnd()*(h-6)), rnd()<0.5?P[3]:P[1]);
+  } else if(id==='idol'){
+    rp(c,cx-15,base-7,30,8,P[0]); rp(c,cx-14,base-6,28,6,P[1]);
+    ell(c,cx,base-24,11,16,P[0]); ell(c,cx,base-24,10,15,P[1]);
+    ell(c,cx-1,base-26,8,12,P[2]); ell(c,cx-2,base-28,5,8,P[3]);
+    ell(c,cx,base-48,9,11,P[0]); ell(c,cx,base-48,8,10,P[1]); ell(c,cx-1,base-50,6,7,P[2]);
+    circ(c,cx,base-50,3,P[0]); circ(c,cx,base-50,2,P[4]);   // an eye that should not be there
+    for(i=0;i<20;i++) px(c,Math.round(cx-12+rnd()*24),Math.round(base-8-rnd()*48), rnd()<0.5?P[0]:P[3]);
+  }
+}
+function bakeDecor(){
+  for(var i=0;i<DECOR.length;i++){
+    var d=DECOR[i]; SPR.decor[d.id]=[];
+    for(var v=0;v<2;v++){
+      (function(d,v){
+        SPR.decor[d.id].push(makeSprite(d.w,d.h,function(c,w,h){ drawDecor(c,d.id,w,h,0x5EED+d.id.length*97+v*31); }));
+      })(d,v);
+    }
+  }
+}
+function bakeRings(){
+  var kinds=['ok','unstable','chimera'];
+  for(var k=0;k<kinds.length;k++){
+    SPR.ring[kinds[k]]=[];
+    for(var r=0;r<3;r++){
+      SPR.ring[kinds[k]].push(makeRing(Math.round(RANK_LEN[r]*0.78),3,SIGNAL[kinds[k]],10));
+    }
+  }
+}
+function bakeAll(){
+  bakeFood(); bakeRings(); bakeDecor(); bakeBackground();
+  SPR.far = bakeLayer(0xFA71,300,['#0e4a5a','#125868'],40,'far');
+  SPR.mid = bakeLayer(0x31D2,392,['#0c3e4c','#105260','#156270'],28,'mid');
+  bakeFloor(); bakeKelp(); bakeRays(); bakeCaustic(); bakeFront(); bakeGlass();
+}
+
+/* ============================================================
+   GAME STATE — every field initialised here (template §3)
+   ============================================================ */
+var G = {
+  scene:'menu',          // menu | tank | codex
+  name:'', pearls:60,
+  discovered:{},         // id -> true
+  unlocked:{},           // base species earned through achievements
+  achs:{},               // achievement id -> true
+  stats:{merges:0,mutants:0,chimeras:0,released:0},
+  fish:[], pellets:[], parts:[], bubbles:[], decor:[], quests:[],
+  env:{LUMEN:0,ABYSS:0,ARMOR:0,FLOW:0,BLOOM:0,CHIMERA:0},
+  oxyCap:150, oxyUse:0, stagnant:false,
+  speed:1, spawnTimer:0,
+  feedOpen:false, foodIdx:0,
+  buildOpen:false, buildIdx:0, questsOpen:false,
+  drag:null, dragOff:{x:0,y:0}, ptr:{x:0,y:0},
+  event:null,            // {title,sub,id,t}
+  codexSel:null, confirmNew:false,
+  timeScale:1,
+  toast:null,
+  t:0, frames:0,
+  codexScroll:0
+};
+
+/* ---------- save / load with sanitising (template §10) ---------- */
+function save(){
+  try{
+    var d={ v:3, name:G.name, pearls:G.pearls, discovered:G.discovered, spawnTimer:G.spawnTimer,
+      unlocked:G.unlocked, achs:G.achs, stats:G.stats,
+      decor:G.decor.map(function(x){ return {id:x.id,x:x.x,v:x.v}; }),
+      quests:G.quests.map(function(q){ return {id:q.id,prog:q.prog}; }),
+      fish:G.fish.map(function(f){ return {s:f.sp,r:f.rank,a:f.age,x:f.x,y:f.y,d:f.diet}; }) };
+    localStorage.setItem(SAVE_KEY,JSON.stringify(d));
+  }catch(e){}
+}
+function num(v,def,lo,hi){
+  v=Number(v);
+  if(!isFinite(v)) return def;
+  if(v<lo) return lo; if(v>hi) return hi;
+  return v;
+}
+function load(){
+  var d=null;
+  try{ d=JSON.parse(localStorage.getItem(SAVE_KEY)||'null'); }catch(e){ d=null; }
+  if(!d||typeof d!=='object') return false;
+  G.name = (typeof d.name==='string')? d.name.slice(0,14) : '';
+  G.pearls = num(d.pearls,60,0,PEARL_CAP);
+  G.spawnTimer = num(d.spawnTimer,0,0,SPAWN_COOLDOWN);
+  G.discovered = {};
+  if(d.discovered && typeof d.discovered==='object'){
+    for(var k in d.discovered) if(SPECIES[k]) G.discovered[k]=true;
+  }
+  G.unlocked = {};
+  if(d.unlocked && typeof d.unlocked==='object'){
+    for(var k2 in d.unlocked) if(LOCKED_BASE.indexOf(k2)>=0) G.unlocked[k2]=true;
+  }
+  G.achs = {};
+  if(d.achs && typeof d.achs==='object'){
+    for(var k3 in d.achs){ for(var ai=0;ai<ACHS.length;ai++) if(ACHS[ai].id===k3) G.achs[k3]=true; }
+  }
+  G.stats = {merges:0,mutants:0,chimeras:0,released:0};
+  if(d.stats && typeof d.stats==='object'){
+    for(var k4 in G.stats) G.stats[k4]=num(d.stats[k4],0,0,999999);
+  }
+  G.decor=[];
+  if(Array.isArray(d.decor)){
+    for(var q0=0;q0<d.decor.length && G.decor.length<DECOR_MAX;q0++){
+      var dd0=d.decor[q0];
+      if(!dd0 || !decorDef(dd0.id)) continue;                      // unknown decor -> dropped
+      G.decor.push({ id:dd0.id, x:num(dd0.x,W/2,20,W-20)|0, v:num(dd0.v,0,0,1)|0 });
+    }
+  }
+  G.quests=[];
+  if(Array.isArray(d.quests)){
+    for(var q1=0;q1<d.quests.length && G.quests.length<3;q1++){
+      var qq=d.quests[q1];
+      if(!qq || !questDef(qq.id)) continue;
+      G.quests.push({ id:qq.id, prog:num(qq.prog,0,0,9999) });
+    }
+  }
+  fillQuests();
+  recalcEnv();
+  G.fish=[];
+  if(Array.isArray(d.fish)){
+    for(var i=0;i<d.fish.length && i<80;i++){
+      var f=d.fish[i];
+      if(!f||!SPECIES[f.s]) continue;                    // unknown skin -> drop
+      var nf=makeFish(f.s, num(f.r,0,0,2)|0, num(f.x,W/2,20,W-20), num(f.y,240,SURFACE+10,FLOOR-10));
+      nf.age = num(f.a,0,0,1);
+      if(f.d) for(var a=0;a<AXES.length;a++) nf.diet[AXES[a]] = num(f.d[AXES[a]],0,0,100);
+      G.fish.push(nf);
+    }
+  }
+  return true;
+}
+
+/* ---------- fish factory ---------- */
+var fishId=1;
+function makeFish(spId,rank,x,y){
+  var sp=SPECIES[spId];
+  return {
+    id:fishId++, sp:spId, rank:rank|0, age:0,
+    x:x, y:y, vx:(gameRnd()-0.5)*30, vy:0, dir:gameRnd()<0.5?-1:1,
+    tx:x, ty:y, hunger:0.4, frame:gameRnd()*FRAMES, diet:newDiet(),
+    z: 0.5+gameRnd()*0.5, held:false, breed: 12+gameRnd()*20, bob:gameRnd()*6.28,
+    flash:0, bottom: (sp.body==='flat'||sp.move==='crawl'||sp.body==='snail'),
+    /* every fish owns a patch of the tank - without this they all drift to the middle.
+       homes are handed out along a golden-ratio sequence, so they spread evenly
+       instead of clumping the way plain random does. */
+    homeX: 60+((fishId*0.6180339887)%1)*(W-120),
+    homeY: (sp.body==='flat'||sp.move==='crawl'||sp.body==='snail') ? (FLOOR-40-((fishId*0.7548776662)%1)*40)
+         : (sp.move==='drift') ? (SURFACE+50+((fishId*0.7548776662)%1)*160)
+         : (SURFACE+56+((fishId*0.7548776662)%1)*(FLOOR-SURFACE-130)),
+    roam: 80+gameRnd()*110,
+    retarget: gameRnd()*4,
+    pace: 0.8+gameRnd()*0.5,
+    _flip:false
+  };
+}
+function discover(id){
+  if(G.discovered[id]) return false;
+  G.discovered[id]=true; addPearls(100);
+  questEvent('discover',1);
+  return true;
+}
+function addPearls(n){ G.pearls=Math.min(PEARL_CAP,Math.max(0,G.pearls+n)); }
+function speciesCount(){ var n=0; for(var k in G.discovered) if(G.discovered[k]) n++; return n; }
+
+/* ---------- oxygen ---------- */
+function recalcEnv(){
+  var i, a;
+  for(a=0;a<AXES.length;a++) G.env[AXES[a]]=0;
+  var cap=150;
+  for(i=0;i<G.decor.length;i++){
+    var d=decorDef(G.decor[i].id);
+    if(!d) continue;
+    G.env[d.axis]+=1;
+    cap+=d.o2;
+  }
+  G.oxyCap=cap;
+}
+function recalcOxygen(){
+  var u=0;
+  for(var i=0;i<G.fish.length;i++) u+=RANK_O2[G.fish[i].rank];
+  G.oxyUse=u; G.stagnant = u>G.oxyCap;
+}
+
+/* ============================================================
+   MERGE — the heart of the game
+   ============================================================ */
+/* what would happen if these two met? null = nothing */
+function mergeKind(a,b){
+  if(!a||!b||a===b) return null;
+  if(a.age<1||b.age<1) return null;
+  var spA=SPECIES[a.sp], spB=SPECIES[b.sp];
+  if(!spA||!spB) return null;
+  /* mutants are unstable: two ADULT L3 mutants cross, even across different lines */
+  if(spA.mutantOf && spB.mutantOf && a.rank===2 && b.rank===2)
+    return CHIMERA[chimeraKey(a.sp,b.sp)] ? 'chimera' : null;
+  if(a.sp!==b.sp) return null;
+  if(a.rank===b.rank) return a.rank<2 ? 'rank' : 'evolve';
+  return 'unstable';
+}
+function tryMerge(a,b){
+  var kind=mergeKind(a,b);
+  if(!kind) return false;
+  var sp=SPECIES[a.sp];
+  var x=(a.x+b.x)/2, y=(a.y+b.y)/2;
+  var diet=newDiet(), i;
+  for(i=0;i<AXES.length;i++) diet[AXES[i]]=a.diet[AXES[i]]+b.diet[AXES[i]];
+  var spA=a.sp, spB=b.sp;
+  removeFish(a); removeFish(b);
+
+  var res=null, coins=0, title=null, sub=null, isNew=false;
+
+  if(kind==='chimera'){
+    var target=CHIMERA[chimeraKey(spA,spB)];
+    if(target && gameRnd()<CHIMERA_CHANCE){
+      res=makeFish(target,0,x,y); res.age=1;
+      coins=200; isNew=discover(target);
+      title='CHIMERA!'; sub=SPECIES[target].name;
+    } else {
+      /* 90%: the cross collapses and takes both parents with it */
+      addPearls(15);
+      burst(x,y,44,'#7fa8b8');
+      questEvent('merge',1); questEvent('cross',1); bumpStat('merges',1);
+      G.event={ title:'CROSS FAILED', sub:'BOTH DISSOLVED', id:null, t:EVENT_T, new:false, fail:true };
+      G.timeScale=0.15;
+      recalcOxygen(); save();
+      return true;
+    }
+  } else if(kind==='rank'){
+    res=makeFish(spA,a.rank+1,x,y); res.diet=diet; res.age=1;
+    coins = a.rank===0 ? 8 : 20;
+  } else if(kind==='evolve'){
+    var axis=null, best=-1;
+    for(var k=0;k<sp.axes.length;k++){
+      var ax=sp.axes[k];
+      if(diet[ax]>best){ best=diet[ax]; axis=ax; }
+    }
+    if(best<=0 && sp.axes.length) axis=sp.axes[Math.floor(gameRnd()*sp.axes.length)];
+    var tgt = axis ? sp.evolveTo[axis] : null;
+    if(!tgt){
+      res=makeFish(spA,2,x,y); res.diet=diet; res.age=1; coins=20;
+      toast('THIS LINE ENDS HERE - FOR NOW');
+    } else {
+      res=makeFish(tgt,0,x,y); res.age=1;
+      coins=50; isNew=discover(tgt);
+      title=isNew?'NEW SPECIES':'EVOLVED'; sub=SPECIES[tgt].name;
+    }
+  } else { /* unstable: mismatched ranks */
+    if(gameRnd()<0.25 && sp.mutant){
+      res=makeFish(sp.mutant,0,x,y); res.age=1;
+      coins=50; isNew=discover(sp.mutant);
+      title='MUTANT!'; sub=SPECIES[sp.mutant].name;
+    } else {
+      res=makeFish(spA,Math.min(a.rank,b.rank),x,y); res.diet=diet; res.age=1;
+      coins=8; toast('UNSTABLE CROSS - FELL BACK');
+    }
+  }
+  addPearls(coins);
+  bumpStat('merges',1);
+  questEvent('merge',1);
+  if(kind==='evolve' && title) questEvent('evolve',1);
+  if(title==='MUTANT!'){ questEvent('mutant',1); bumpStat('mutants',1); }
+  if(title==='CHIMERA!'){ questEvent('cross',1); bumpStat('chimeras',1); }
+  if(res.rank===2) questEvent('l3',1);
+  G.fish.push(res);
+  burst(x,y,title?30:12,title?'#b8f6ff':'#8fd8c8');
+  if(title){ G.event={title:title,sub:sub,id:res.sp,t:EVENT_T,new:isNew}; G.timeScale=0.15; }
+  recalcOxygen(); save();
+  return true;
+}
+function removeFish(f){
+  var i=G.fish.indexOf(f);
+  if(i>=0) G.fish.splice(i,1);
+}
+function releaseFish(f){
+  if(!f) return;
+  removeFish(f);
+  burst(f.x,f.y,18,'#bff0ff');
+  for(var i=0;i<10;i++) G.bubbles.push({x:f.x+(gameRnd()-0.5)*20,y:f.y,r:1+Math.round(gameRnd()*2),v:40+gameRnd()*30,w:gameRnd()*6.28});
+  G.stats.released=(G.stats.released||0)+1;
+  recalcOxygen(); save();
+  toast('RELEASED - IT STAYS IN YOUR CODEX FOREVER');
+}
+function toast(msg){ G.toast={msg:msg,t:2.2}; }
+function rollQuest(exclude){
+  var taken={}, i;
+  for(i=0;i<G.quests.length;i++) taken[G.quests[i].id]=true;
+  if(exclude) taken[exclude]=true;                 // the one just finished must not come straight back
+  var pool=QUEST_POOL.filter(function(q){ return !taken[q.id]; });
+  if(!pool.length) pool=QUEST_POOL.filter(function(q){ return !taken[q.id] || q.id!==exclude; });
+  if(!pool.length) pool=QUEST_POOL;
+  var q=pool[Math.floor(gameRnd()*pool.length)];
+  return { id:q.id, prog:0 };
+}
+function fillQuests(exclude){ while(G.quests.length<3) G.quests.push(rollQuest(exclude)); }
+function checkAchs(){
+  for(var i=0;i<ACHS.length;i++){
+    var a=ACHS[i];
+    if(G.achs[a.id]) continue;
+    if((G.stats[a.stat]||0) < a.goal) continue;
+    G.achs[a.id]=true;
+    G.unlocked[a.gives]=true;
+    var sp=SPECIES[a.gives];
+    G.event={ title:'UNLOCKED', sub:sp?sp.name:a.gives, id:a.gives, t:EVENT_T, new:true, ach:true };
+    G.timeScale=0.15;
+    addPearls(150);
+    save();
+  }
+}
+function bumpStat(k,n){ G.stats[k]=(G.stats[k]||0)+(n||1); checkAchs(); }
+function questEvent(ev,n){
+  n=n||1;
+  for(var i=0;i<G.quests.length;i++){
+    var q=G.quests[i], d=questDef(q.id);
+    if(!d || d.ev!==ev) continue;
+    q.prog+=n;
+    if(q.prog>=d.goal){
+      addPearls(d.reward);
+      toast('QUEST DONE: +'+d.reward+' PEARLS');
+      var done=q.id;
+      G.quests.splice(i,1); i--;
+      fillQuests(done);
+    }
+  }
+}
+function burst(x,y,n,col){
+  for(var i=0;i<n;i++){
+    var a=gameRnd()*6.283, s=20+gameRnd()*120;
+    G.parts.push({x:x,y:y,vx:Math.cos(a)*s,vy:Math.sin(a)*s,life:0.5+gameRnd()*0.7,t:0,col:col});
+  }
+}
+
+/* ============================================================
+   SIMULATION
+   ============================================================ */
+function tankFull(){ return G.oxyUse+RANK_O2[0] > G.oxyCap; }
+function decorAt(x){
+  for(var i=G.decor.length-1;i>=0;i--){
+    var d=decorDef(G.decor[i].id);
+    if(!d) continue;
+    if(Math.abs(x-G.decor[i].x) < d.w*0.5+4) return i;
+  }
+  return -1;
+}
+function placeDecor(x){
+  var d=DECOR[G.buildIdx];
+  if(!d) return;
+  if(G.decor.length>=DECOR_MAX){ toast('NO ROOM LEFT ON THE FLOOR'); return; }
+  if(G.pearls<d.cost){ toast('NOT ENOUGH PEARLS'); return; }
+  x=Math.max(40,Math.min(W-40,x));
+  if(decorAt(x)>=0){ toast('SOMETHING IS ALREADY THERE'); return; }
+  addPearls(-d.cost);
+  G.decor.push({ id:d.id, x:Math.round(x), v:Math.floor(gameRnd()*2) });
+  recalcEnv(); recalcOxygen(); questEvent('decor',1);
+  burst(x,FLOOR-10,14,'#9ee08a');
+  toast(d.name+' PLANTED  (+'+d.axis+(d.o2?'  +'+d.o2+' O2':'')+')');
+  save();
+}
+function removeDecor(i){
+  var d=decorDef(G.decor[i].id);
+  if(!d) return;
+  G.decor.splice(i,1);
+  addPearls(Math.round(d.cost*0.5));
+  recalcEnv(); recalcOxygen(); save();
+  toast('REMOVED  +'+Math.round(d.cost*0.5)+' PEARLS');
+}
+function spawnFry(){
+  var pool=availableBase();
+  var id=pool[Math.floor(gameRnd()*pool.length)];
+  var f=makeFish(id,0,80+gameRnd()*(W-160),SURFACE+40+gameRnd()*60);
+  G.fish.push(f); discover(id);
+  G.parts.push({x:f.x,y:f.y,vx:0,vy:0,life:0.6,t:0,col:'#9ff0e0'});
+  burst(f.x,f.y,10,'#9ff0e0');
+  recalcOxygen(); save();
+}
+function dropFood(x,y){
+  var f=FOODS[G.foodIdx];
+  if(f.cost>0){
+    if(G.pearls<f.cost){ toast('NOT ENOUGH PEARLS'); return; }
+    addPearls(-f.cost);
+  }
+  for(var i=0;i<4;i++){
+    G.pellets.push({x:x+(gameRnd()-0.5)*26,y:y+(gameRnd()-0.5)*14,vy:14+gameRnd()*10,food:f.id,axis:f.axis,taken:false});
+  }
+  if(f.axis) questEvent('special',1);
+}
+function update(dt){
+  G.t+=dt; G.frames++;
+  var i,f;
+
+  if(G.event){
+    G.event.t-=dt;
+    if(G.event.t<=0){ G.event=null; G.timeScale=1; }
+  }
+  if(G.toast){ G.toast.t-=dt; if(G.toast.t<=0) G.toast=null; }
+  if(G.spawnTimer>0){ G.spawnTimer=Math.max(0,G.spawnTimer-dt); }
+
+  /* pellets sink */
+  for(i=G.pellets.length-1;i>=0;i--){
+    var p=G.pellets[i];
+    p.y+=p.vy*dt; p.x+=Math.sin(G.t*2+p.y*0.05)*6*dt;
+    if(p.y>FLOOR-4 || p.taken) G.pellets.splice(i,1);
+  }
+
+  /* fish */
+  for(i=0;i<G.fish.length;i++){
+    f=G.fish[i];
+    var sp=SPECIES[f.sp];
+    if(f.flash>0) f.flash-=dt;
+
+    if(f.held) continue;
+
+    f.hunger=Math.min(1,f.hunger+dt*0.022);
+
+    /* seek food */
+    var target=null, bd=1e9;
+    for(var j=0;j<G.pellets.length;j++){
+      var q=G.pellets[j];
+      var d2=(q.x-f.x)*(q.x-f.x)+(q.y-f.y)*(q.y-f.y);
+      if(d2<bd && d2<230*230){ bd=d2; target=q; }
+    }
+    if(target){
+      f.tx=target.x; f.ty=target.y;
+      if(bd<12*12){
+        target.taken=true;
+        f.hunger=Math.max(0,f.hunger-0.34);
+        f.age=Math.min(1,f.age+(0.10+(target.axis?0.06:0))*(G.stagnant?0.5:1));
+        if(target.axis) f.diet[target.axis]=Math.min(100,f.diet[target.axis]+1);
+        burst(target.x,target.y,3,'#cfe9d8');
+      }
+    } else {
+      f.retarget-=dt;
+      f.homeX += (gameRnd()-0.5)*14*dt;   // the patch itself drifts, slowly
+      f.homeY += (gameRnd()-0.5)*8*dt;
+      f.homeX = Math.max(70,Math.min(W-70,f.homeX));
+      f.homeY = Math.max(SURFACE+50,Math.min(FLOOR-40,f.homeY));
+      if((Math.abs(f.tx-f.x)<26 && Math.abs(f.ty-f.y)<26) || f.retarget<=0){
+        f.retarget = 3.5+gameRnd()*5;
+        f.tx = Math.max(36,Math.min(W-36, f.homeX+(gameRnd()*2-1)*f.roam));
+        f.ty = Math.max(SURFACE+26,Math.min(FLOOR-26, f.homeY+(gameRnd()*2-1)*f.roam*0.45));
+      }
+    }
+
+    /* move */
+    var mv = sp.move||'swim';
+    var spd = RANK_LEN[f.rank]*0.75 * f.pace
+            * (G.stagnant?0.45:1)
+            * (sp.axes.indexOf('FLOW')>=0?1.4:1)
+            * (f.bottom?0.7:1)
+            * (mv==='drift'?0.30:(mv==='hover'?0.42:(mv==='crawl'?0.55:1)));
+    var dx=f.tx-f.x, dy=f.ty-f.y, dl=Math.hypot(dx,dy)||1;
+    f.vx += (dx/dl*spd - f.vx)*Math.min(1,dt*1.6);
+    f.vy += (dy/dl*spd*0.7 - f.vy)*Math.min(1,dt*1.6);
+    /* separation */
+    var sx=0, sy=0;
+    for(var s2=0;s2<G.fish.length;s2++){
+      var o=G.fish[s2];
+      if(o===f) continue;
+      var ox=f.x-o.x, oy=f.y-o.y, od=Math.hypot(ox,oy);
+      var need=(RANK_LEN[f.rank]+RANK_LEN[o.rank])*0.40;
+      if(od<need && od>0.001){ sx+=ox/od*(need-od); sy+=oy/od*(need-od); }
+      else if(od<=0.001){ sx+=1; sy+=1; }
+    }
+    f.vx += Math.max(-90,Math.min(90,sx*3))*dt*2;
+    f.vy += Math.max(-90,Math.min(90,sy*3))*dt*2;
+    f.x+=f.vx*dt; f.y+=f.vy*dt;
+    f.bob+=dt*(mv==='drift'?1.2:3);
+    f.y+=Math.sin(f.bob)*(mv==='drift'?22:6)*dt;   // jellyfish pulse instead of swim
+    if(f.x<26){ f.x=26; f.tx=f.x+80+gameRnd()*160; f.homeX=Math.max(f.homeX,90); f.vx=Math.abs(f.vx); }
+    if(f.x>W-26){ f.x=W-26; f.tx=f.x-80-gameRnd()*160; f.homeX=Math.min(f.homeX,W-90); f.vx=-Math.abs(f.vx); }
+    if(f.y<SURFACE+16){ f.y=SURFACE+16; f.ty=f.y+60+gameRnd()*90; f.vy=Math.abs(f.vy); }
+    if(f.y>FLOOR-10){ f.y=FLOOR-10; f.ty=f.y-60-gameRnd()*90; f.vy=-Math.abs(f.vy); }
+    if(Math.abs(f.vx)>3) f.dir = f.vx<0?-1:1;
+    f.frame = (f.frame + dt*(4+Math.min(6,Math.abs(f.vx)*0.12))) % FRAMES;
+
+    /* the tank itself leans on every fish: slow, but it never stops */
+    for(var ea=0;ea<AXES.length;ea++){
+      var eax=AXES[ea];
+      if(G.env[eax]>0) f.diet[eax]=Math.min(100,f.diet[eax]+G.env[eax]*dt*0.06);
+    }
+    if(!f._ax40){
+      for(var eb=0;eb<AXES.length;eb++) if(f.diet[AXES[eb]]>=40){ f._ax40=true; questEvent('axis40',1); break; }
+    }
+
+    /* grow with time when fed */
+    if(f.hunger<0.6) f.age=Math.min(1,f.age+dt*0.02*(G.stagnant?0.5:1));
+
+    /* breed. Base species are prolific; everything else is slow but never zero -
+       an evolved fish with no possible partner would be a dead end. */
+    if(f.age>=1 && f.hunger<0.45 && !G.stagnant){
+      f.breed-=dt*(sp.base?1:0.4);
+      if(f.breed<=0){
+        f.breed=20+gameRnd()*20;
+        if(G.oxyUse+RANK_O2[0] <= G.oxyCap && G.fish.length<28){
+          var kid=makeFish(f.sp,0,f.x+(gameRnd()-0.5)*30,f.y+10);
+          G.fish.push(kid); recalcOxygen();
+          burst(kid.x,kid.y,6,'#bff0ff');
+        }
+      }
+    }
+  }
+
+  /* particles */
+  for(i=G.parts.length-1;i>=0;i--){
+    var pt=G.parts[i];
+    pt.t+=dt; pt.x+=pt.vx*dt; pt.y+=pt.vy*dt; pt.vy+=12*dt; pt.vx*=0.96;
+    if(pt.t>=pt.life) G.parts.splice(i,1);
+  }
+  /* ambient bubbles */
+  if(G.bubbles.length<40 && gameRnd()<dt*8){
+    G.bubbles.push({x:20+gameRnd()*(W-40),y:FLOOR-4,r:1+Math.round(gameRnd()*2),v:16+gameRnd()*24,w:gameRnd()*6.28});
+  }
+  for(i=0;i<G.decor.length;i++){
+    if(G.decor[i].id==='vent' && G.bubbles.length<70 && gameRnd()<dt*7){
+      G.bubbles.push({x:G.decor[i].x+(gameRnd()-0.5)*8,y:FLOOR-26,r:1+Math.round(gameRnd()*2),v:34+gameRnd()*30,w:gameRnd()*6.28});
+    }
+  }
+  for(i=G.bubbles.length-1;i>=0;i--){
+    var b=G.bubbles[i]; b.y-=b.v*dt; b.w+=dt*2;
+    if(b.y<SURFACE) G.bubbles.splice(i,1);
+  }
+  recalcOxygen();
+}
+
+/* ============================================================
+   RENDER
+   ============================================================ */
+var cv=document.getElementById('cv');
+var ctx=cv.getContext('2d');
+function drawScene(c){
+  c.drawImage(SPR.bg,0,0);
+  c.drawImage(SPR.far,0,0);
+  c.drawImage(SPR.mid,0,0);
+  /* mid plants */
+  for(var i=0;i<SPR.plantsMid.length;i++){
+    var p=SPR.plantsMid[i];
+    c.drawImage(p, 40+i*240, FLOOR-p.height+10);
+  }
+  c.drawImage(SPR.floorL,0,FLOOR-8);
+  /* decor sits on the floor, behind everything alive */
+  for(var di=0;di<G.decor.length;di++){
+    var dd=G.decor[di], def=decorDef(dd.id);
+    if(!def) continue;
+    var dimg=SPR.decor[dd.id] ? SPR.decor[dd.id][dd.v||0] : null;
+    if(!dimg) continue;
+    c.drawImage(dimg, Math.round(dd.x-dimg.width/2), FLOOR-dimg.height+6);
+    if(G.buildOpen){
+      c.globalAlpha=0.5+Math.sin(G.t*6)*0.2;
+      text(c,'TAP TO REMOVE',dd.x,FLOOR-dimg.height-10,6,'#ffd400','center');
+      c.globalAlpha=1;
+    }
+  }
+  /* caustics on floor */
+  c.globalCompositeOperation='lighter';
+  c.drawImage(SPR.caustic[Math.floor(G.t*6)%6],0,FLOOR-30);
+  c.globalCompositeOperation='source-over';
+
+  /* far-plane fish, then haze, then near-plane fish */
+  var far=[], near=[];
+  for(var k=0;k<G.fish.length;k++) (G.fish[k].z<0.75?far:near).push(G.fish[k]);
+  far.sort(byY); near.sort(byY);
+  for(var a=0;a<far.length;a++) drawFish(c,far[a],0.78);
+  c.fillStyle='rgba(28,110,126,0.28)'; c.fillRect(0,SURFACE-8,W,FLOOR-SURFACE+16);
+  for(var b=0;b<near.length;b++) drawFish(c,near[b],1);
+
+  /* pellets */
+  for(var p2=0;p2<G.pellets.length;p2++){
+    var q=G.pellets[p2];
+    c.drawImage(SPR.food[q.food], Math.round(q.x-3), Math.round(q.y-3));
+  }
+  /* particles */
+  for(var t=0;t<G.parts.length;t++){
+    var pt=G.parts[t];
+    var al=1-pt.t/pt.life;
+    c.globalAlpha=Math.max(0,al); c.fillStyle=pt.col;
+    c.fillRect(pt.x|0,pt.y|0,2,2); c.globalAlpha=1;
+  }
+  /* bubbles */
+  c.globalAlpha=0.5;
+  for(var u=0;u<G.bubbles.length;u++){
+    var bb=G.bubbles[u];
+    circ(c,bb.x+Math.sin(bb.w)*4,bb.y,bb.r,'#bff2ff');
+  }
+  c.globalAlpha=1;
+  /* light */
+  c.globalCompositeOperation='lighter';
+  c.drawImage(SPR.rays,0,0);
+  c.globalCompositeOperation='source-over';
+  c.drawImage(SPR.front,0,0);
+  c.drawImage(SPR.glass,0,0);
+}
+function byY(a,b){ return a.y-b.y; }
+function drawFish(c,f,alpha){
+  var sp=SPECIES[f.sp];
+  var arr=fishFrames(f.sp,f.rank);
+  var img=arr[Math.floor(f.frame)%FRAMES] || arr[0];
+  if(!img) return;
+  var scale = (f.age<0.34?0.62:(f.age<1?0.82:1)) * (alpha<1?0.88:1);
+  var w=Math.max(2,Math.round(img.width*scale)), h=Math.max(2,Math.round(img.height*scale));
+  var x=Math.round(f.x-w/2), y=Math.round(f.y-h/2);
+  var gl=fishGlow(f.sp);
+  if(gl){
+    var g=gl;
+    var gw=Math.max(4,Math.round(g.width*(RANK_LEN[f.rank]/RANK_LEN[2])*scale));
+    c.globalCompositeOperation='lighter';
+    c.globalAlpha=0.6*alpha;
+    c.drawImage(g,Math.round(f.x-gw/2),Math.round(f.y-gw/2),gw,gw);
+    c.globalAlpha=1; c.globalCompositeOperation='source-over';
+  }
+  c.globalAlpha=alpha * (G.stagnant?0.7:1);
+  if(f.held){ c.globalAlpha=1; }
+  f._flip = (f.dir<0);
+  if(f._flip){
+    c.save(); c.translate(x+w,y); c.scale(-1,1); c.drawImage(img,0,0,w,h); c.restore();
+  } else {
+    c.drawImage(img,x,y,w,h);
+  }
+  c.globalAlpha=1;
+  /* drag target hint: dashed ring in a reserved signal colour, never a soft halo.
+     green = safe, orange = risky, red = you may lose both. */
+  if(G.drag && G.drag!==f){
+    var kind=mergeKind(G.drag,f);
+    if(kind){
+      var key = kind==='chimera' ? 'chimera' : (kind==='unstable' ? 'unstable' : 'ok');
+      var rimg = SPR.ring[key] ? SPR.ring[key][f.rank] : null;
+      if(rimg){
+        c.globalAlpha=0.6+Math.sin(G.t*9)*0.35;
+        c.drawImage(rimg,Math.round(f.x-rimg.width/2),Math.round(f.y-rimg.height/2));
+        c.globalAlpha=1;
+      }
+      var ly=Math.round(f.y-RANK_LEN[f.rank]*0.78)-16;
+      if(kind==='chimera')      text(c,'10% OR BOTH DIE',f.x,ly,9,SIGNAL.chimera,'center');
+      else if(kind==='unstable')text(c,'25% MUTANT',f.x,ly,8,SIGNAL.unstable,'center');
+    }
+  }
+}
+
+/* ---------- UI ---------- */
+function text(c,s,x,y,size,col,align){
+  c.font=size+'px "Press Start 2P", monospace';
+  c.textAlign=align||'left'; c.textBaseline='top';
+  c.fillStyle='#04121a'; c.fillText(s,x+2,y+2);
+  c.fillStyle=col; c.fillText(s,x,y);
+}
+function panel(c,x,y,w,h,col){
+  rp(c,x-2,y-2,w+4,h+4,'#08222c');
+  rp(c,x,y,w,h,col||'#0e3a47');
+  rp(c,x,y,w,2,'#1d6b7a'); rp(c,x,y+h-2,w,2,'#061a22');
+}
+var BTN={};
+function layoutButtons(){
+  var ws=[150,150,164,92,150,140], x=18, y=H-58, gap=8;
+  var keys=['feed','build','life','speed','quests','codex'];
+  var labels=['FEED','BUILD','NEW LIFE','x'+G.speed,'QUESTS','CODEX'];
+  BTN={};
+  for(var i=0;i<keys.length;i++){
+    BTN[keys[i]]={x:x,y:y,w:ws[i],h:42,label:labels[i]};
+    x+=ws[i]+gap;
+  }
+}
+function drawUI(c){
+  layoutButtons();
+  /* top status */
+  panel(c,10,8,W-20,26,'#0a2a36');
+  text(c,'\u25c4 '+(G.name||'GARDENER').toUpperCase(),20,14,10,'#7fe9d0');
+  BTN.menu={x:12,y:8,w:180,h:26};
+  text(c,'PEARLS '+G.pearls,300,14,10,'#ffd98a');
+  text(c,'SPECIES '+speciesCount()+'/'+SPECIES_ORDER.length,470,14,10,'#b8f6ff');
+  /* oxygen bar */
+  var ow=180, ox=W-ow-20;
+  rp(c,ox-1,13,ow+2,12,'#06202a');
+  var frac=Math.min(1.4,G.oxyUse/G.oxyCap);
+  var fw=Math.round(Math.min(1,frac)*ow);
+  rp(c,ox,14,fw,10, G.stagnant?'#e0525a':'#3fd0a8');
+  text(c,'O2',ox-26,14,9,'#9fe8dc');
+  if(G.stagnant) text(c,'CROWDED - EVERYTHING GROWS SLOWLY. MERGE SOME FISH.',W/2,42,9,'#ffb0b0','center');
+
+  /* while a fish is in hand the whole button bar turns into one safe drop target */
+  if(G.drag){
+    var rp2={x:18,y:H-58,w:W-36,h:42};
+    var glow=0.5+Math.sin(G.t*6)*0.3;
+    c.globalAlpha=glow; rp(c,rp2.x-6,rp2.y-6,rp2.w+12,rp2.h+12,'#1d5f4a'); c.globalAlpha=1;
+    panel(c,rp2.x,rp2.y,rp2.w,rp2.h,'#176d4e');
+    text(c,'DROP HERE TO RELEASE  -  IT STAYS IN YOUR CODEX',W/2,rp2.y+15,10,'#dfffe8','center');
+    text(c,VERSION,W-16,H-14,8,'rgba(160,220,230,0.5)','right');
+    return;
+  }
+
+  /* bottom buttons */
+  for(var k in BTN){
+    var b=BTN[k];
+    var ready = (k==='life' && G.spawnTimer<=0 && !tankFull());
+    panel(c,b.x,b.y,b.w,b.h, ready ? '#175f6d':'#0e3a47');
+    var lab=b.label;
+    if(k==='life' && tankFull()) lab='TANK FULL';
+    else if(k==='life' && G.spawnTimer>0) lab='WAIT '+Math.ceil(G.spawnTimer)+'s';
+    if(k==='feed') lab='FEED: '+FOODS[G.foodIdx].name.split(' ')[0];
+    if(k==='build') lab='BUILD '+G.decor.length+'/'+DECOR_MAX;
+    text(c,lab,b.x+b.w/2,b.y+15,10, (k==='life'&&!ready)?'#5f8b95':'#eafffb','center');
+  }
+  /* food tray */
+  if(G.feedOpen){
+    var ty=H-58-FOODS.length*30-8;
+    panel(c,16,ty,240,FOODS.length*30+4,'#0a2a36');
+    for(var i=0;i<FOODS.length;i++){
+      var f=FOODS[i];
+      var yy=ty+4+i*30;
+      if(i===G.foodIdx) rp(c,18,yy,236,26,'#175f6d');
+      circ(c,32,yy+13,4,'#101820'); circ(c,32,yy+13,3,f.col);
+      text(c,f.name,46,yy+9,8,'#eafffb');
+      text(c,f.cost?(''+f.cost):'FREE',248,yy+9,8, f.cost?'#ffd98a':'#8fd8c8','right');
+    }
+  }
+  /* build tray */
+  if(G.buildOpen){
+    var by2=H-58-DECOR.length*30-8;
+    panel(c,168,by2,300,DECOR.length*30+4,'#0a2a36');
+    for(var bi=0;bi<DECOR.length;bi++){
+      var d=DECOR[bi], yy2=by2+4+bi*30;
+      if(bi===G.buildIdx) rp(c,170,yy2,296,26,'#175f6d');
+      circ(c,184,yy2+13,4,'#101820'); circ(c,184,yy2+13,3,DPAL[d.id][3]);
+      text(c,d.name,198,yy2+9,8,'#eafffb');
+      text(c,'+'+d.axis.slice(0,4)+(d.o2?' +'+d.o2+'O2':''),330,yy2+9,6,'#8fd8c8');
+      text(c,''+d.cost,460,yy2+9,8, G.pearls>=d.cost?'#ffd98a':'#8a5a5a','right');
+    }
+    text(c,'PICK ONE, THEN TAP THE FLOOR',318,by2-14,7,'#7fbfc8','center');
+  }
+  /* achievements: the only source of new base species */
+  if(G.questsOpen){
+    var ay=88;
+    panel(c,W-336,ay,320,ACHS.length*34+22,'#0a2a36');
+    text(c,'ACHIEVEMENTS - EACH UNLOCKS A SPECIES',W-176,ay+6,6,'#7fbfc8','center');
+    for(var ai2=0;ai2<ACHS.length;ai2++){
+      var ac=ACHS[ai2], ayy=ay+20+ai2*34, done=!!G.achs[ac.id];
+      var got=Math.min(ac.goal,G.stats[ac.stat]||0);
+      text(c,ac.text,W-324,ayy,6, done?'#3fd0a8':'#eafffb');
+      var apw=200, apf=Math.round(got/ac.goal*apw);
+      rp(c,W-325,ayy+11,apw+2,8,'#06202a');
+      rp(c,W-324,ayy+12,apf,6, done?'#3fd0a8':'#2f7f8f');
+      text(c,got+'/'+ac.goal,W-112,ayy+12,6,'#9fe8dc');
+      var gsp=SPECIES[ac.gives];
+      text(c, done?('OPEN: '+gsp.name):('LOCKED: '+gsp.name), W-24, ayy+12, 6, done?'#ffd98a':'#5f8b95','right');
+    }
+  }
+  /* quests panel */
+  if(G.questsOpen){
+    var qy=H-58-3*40-16;
+    panel(c,W/2-210,qy,420,3*40+12,'#0a2a36');
+    text(c,'QUESTS',W/2,qy-14,9,'#7fbfc8','center');
+    for(var qi=0;qi<G.quests.length;qi++){
+      var q=G.quests[qi], qd=questDef(q.id);
+      if(!qd) continue;
+      var qyy=qy+8+qi*40;
+      text(c,qd.text,W/2-198,qyy,7,'#eafffb');
+      var pw=380, pf=Math.round(Math.min(1,q.prog/qd.goal)*pw);
+      rp(c,W/2-199,qyy+14,pw+2,10,'#06202a');
+      rp(c,W/2-198,qyy+15,pf,8,'#3fd0a8');
+      text(c,q.prog+'/'+qd.goal,W/2+120,qyy+16,6,'#9fe8dc');
+      text(c,'+'+qd.reward,W/2+198,qyy+16,6,'#ffd98a','right');
+    }
+  }
+  /* environment readout: what the tank itself is pushing */
+  var envTxt='', ei;
+  for(ei=0;ei<AXES.length;ei++) if(G.env[AXES[ei]]>0) envTxt+=(envTxt?'  ':'')+AXES[ei]+' x'+G.env[AXES[ei]];
+  if(envTxt) text(c,'TANK LEANS: '+envTxt,W/2,56,7,'rgba(160,230,240,0.65)','center');
+
+  /* toast */
+  if(G.toast){
+    panel(c,W/2-170,H-108,340,26,'#0a2a36');
+    text(c,G.toast.msg,W/2,H-101,9,'#ffd98a','center');
+  }
+  /* hint */
+  if(G.fish.length && !G.event) text(c,'DRAG ONE FISH ONTO ANOTHER OF THE SAME KIND',W/2,H-76,8,'rgba(180,240,255,0.5)','center');
+  text(c,VERSION,W-16,H-14,8,'rgba(160,220,230,0.5)','right');
+}
+function drawEvent(c){
+  if(!G.event) return;
+  var e=G.event;
+  var k=Math.min(1,(EVENT_T-e.t)*8);
+  /* cinematic bars */
+  var bh=Math.round(56*Math.min(1,k*2));
+  rp(c,0,0,W,bh,'#04121a'); rp(c,0,H-bh,W,bh,'#04121a');
+  /* flash */
+  if(e.t>EVENT_T-0.22){ c.globalAlpha=(e.t-(EVENT_T-0.22))/0.22; rp(c,0,0,W,H,'#dffbff'); c.globalAlpha=1; }
+  /* card */
+  var cw=420, cx=W/2-cw/2, cy=H/2-72;
+  panel(c,cx,cy,cw,144,e.fail?'#2a1420':'#0a2a36');
+  if(!e.fail && e.id && SPECIES[e.id]){
+    var img=fishFrames(e.id,2)[Math.floor(G.t*8)%FRAMES];
+    var iw=Math.min(img.width,150), ih=Math.round(img.height*iw/img.width);
+    c.drawImage(img, Math.round(cx+24), Math.round(cy+(144-ih)/2), iw, ih);
+  }
+  var col = e.fail ? '#ff8fb0' : (e.title==='MUTANT!' ? '#f0b8ff' : (e.title==='CHIMERA!' ? '#ffe4ff' : (e.ach ? '#8ffff0' : '#ffd98a')));
+  text(c,e.title,W/2,cy+14,12,col,'center');
+  text(c,e.sub||'',W/2,cy+108,10,'#eafffb','center');
+  if(e.new) text(c, e.ach?'NOW APPEARS FROM NEW LIFE':'ADDED TO CODEX',W/2,cy+126,8,'#8fd8c8','center');
+  if(e.fail) text(c,'+15 PEARLS FOR THE TROUBLE',W/2,cy+126,8,'#8fb8c8','center');
+}
+function hasSave(){
+  try{ return !!localStorage.getItem(SAVE_KEY); }catch(e){ return false; }
+}
+function drawMenu(c){
+  drawScene(c);
+  var grad=c.createLinearGradient(0,0,0,H);
+  grad.addColorStop(0,'rgba(4,18,26,0.15)');
+  grad.addColorStop(0.45,'rgba(4,18,26,0.10)');
+  grad.addColorStop(1,'rgba(4,18,26,0.88)');
+  c.fillStyle=grad; c.fillRect(0,0,W,H);
+  text(c,'DEEP GARDEN',W/2,60,28,'#8ffff0','center');
+  text(c,'AN AQUARIUM THAT EVOLVES',W/2,100,9,'#7fbfc8','center');
+
+  var bw=300, bx=W/2-bw/2;
+  var items=[
+    {k:'cont',  y:170, h:56, label: hasSave()?'CONTINUE':'START', big:true},
+    {k:'newg',  y:242, h:44, label:'NEW GAME'},
+    {k:'board', y:296, h:44, label:'LEADERBOARD'}
+  ];
+  BTN={};
+  for(var i=0;i<items.length;i++){
+    var it=items[i];
+    if(it.big){
+      var pulse=0.5+Math.sin(G.t*3)*0.5;
+      c.globalCompositeOperation='lighter'; c.globalAlpha=0.10+pulse*0.10;
+      rp(c,bx-14,it.y-14,bw+28,it.h+28,'#2fd0c0'); c.globalAlpha=1; c.globalCompositeOperation='source-over';
+    }
+    panel(c,bx,it.y,bw,it.h,it.big?'#175f6d':'#0e3a47');
+    text(c,it.label,W/2,it.y+(it.h-12)/2,it.big?14:11,'#eafffb','center');
+    BTN[it.k]={x:bx,y:it.y,w:bw,h:it.h};
+  }
+  if(G.confirmNew){
+    panel(c,W/2-220,180,440,150,'#2a1420');
+    text(c,'START OVER?',W/2,196,14,'#ff8fb0','center');
+    text(c,'THE TANK, THE CODEX AND EVERY',W/2,228,8,'#eafffb','center');
+    text(c,'ACHIEVEMENT WILL BE WIPED.',W/2,244,8,'#eafffb','center');
+    panel(c,W/2-200,272,180,40,'#7a2030'); text(c,'YES, WIPE IT',W/2-110,286,9,'#ffe0e8','center');
+    panel(c,W/2+20,272,180,40,'#175f6d');  text(c,'CANCEL',W/2+110,286,9,'#eafffb','center');
+    BTN={ yes:{x:W/2-200,y:272,w:180,h:40}, no:{x:W/2+20,y:272,w:180,h:40} };
+  }
+  text(c,VERSION,W-16,H-22,8,'rgba(160,220,230,0.6)','right');
+  if(G.name) text(c,G.name.toUpperCase()+'   SPECIES '+speciesCount()+'/'+SPECIES_ORDER.length,16,H-22,8,'rgba(160,220,230,0.6)');
+}
+function drawBoard(c){
+  drawScene(c);
+  c.fillStyle='rgba(4,18,26,0.92)'; c.fillRect(0,0,W,H);
+  text(c,'LEADERBOARD',W/2,18,14,'#8ffff0','center');
+  text(c,LB.status,W-16,22,8, LB.status==='Synced'?'#3fd0a8':'#8a9aa0','right');
+  panel(c,W/2-160,44,150,26, LB.tab==='week'?'#175f6d':'#0e3a47'); text(c,'THIS WEEK',W/2-85,52,8,'#eafffb','center');
+  panel(c,W/2+10,44,150,26, LB.tab==='all'?'#175f6d':'#0e3a47');  text(c,'ALL TIME',W/2+85,52,8,'#eafffb','center');
+  var rows=lbVisible();
+  panel(c,60,82,W-120,H-146,'#0a2a36');
+  text(c,'#',80,94,7,'#7fbfc8'); text(c,'GARDENER',120,94,7,'#7fbfc8');
+  text(c,'SPECIES',W-260,94,7,'#7fbfc8'); text(c,'MERGES',W-140,94,7,'#7fbfc8');
+  if(!LB_URL){
+    text(c,'NO DATABASE ADDRESS YET.',W/2,180,10,'#ffd98a','center');
+    text(c,'PUT YOUR FIREBASE URL IN  LB_URL  AT THE TOP OF THE FILE',W/2,208,7,'#8fb8c0','center');
+    text(c,'UNTIL THEN EVERYTHING WORKS OFFLINE.',W/2,228,7,'#8fb8c0','center');
+  } else if(!rows.length){
+    text(c, LB.status==='Syncing...' ? 'LOADING...' : 'NO SCORES YET - BE THE FIRST',W/2,180,9,'#8fb8c0','center');
+  }
+  for(var i=0;i<rows.length;i++){
+    var r=rows[i], y=112+i*32;
+    if(r.name===G.name) rp(c,64,y-4,W-128,28,'#123f4c');
+    text(c,''+(i+1),80,y,8, i===0?'#ffd98a':'#9fe8dc');
+    text(c,r.name.toUpperCase(),120,y,8,'#eafffb');
+    text(c,''+r.species,W-260,y,8,'#8ffff0');
+    text(c,''+r.merges,W-140,y,8,'#9fe8dc');
+  }
+  panel(c,W/2-190,H-52,180,32,'#175f6d'); text(c,'REFRESH',W/2-100,H-42,9,'#eafffb','center');
+  panel(c,W/2+10,H-52,180,32,'#0e3a47');  text(c,'BACK',W/2+100,H-42,9,'#eafffb','center');
+  BTN={ week:{x:W/2-160,y:44,w:150,h:26}, all:{x:W/2+10,y:44,w:150,h:26},
+        refresh:{x:W/2-190,y:H-52,w:180,h:32}, back:{x:W/2+10,y:H-52,w:180,h:32} };
+}
+function codexCell(i){
+  var cols=8, cw=113, ch=72;
+  return { x:12+(i%cols)*(cw+4), y:40+Math.floor(i/cols)*(ch+4), w:cw, h:ch };
+}
+function nameOf(id){ return SPECIES[id] ? SPECIES[id].name : '?'; }
+function foodForAxis(ax){
+  for(var i=0;i<FOODS.length;i++) if(FOODS[i].axis===ax) return FOODS[i].name;
+  return 'ANY FOOD';
+}
+/* where does this creature come from? shown even for locked ones - it IS the hint */
+function codexHint(id){
+  var sp=SPECIES[id], k;
+  if(sp.base && !sp.locked) return 'ALREADY IN YOUR TANK';
+  if(sp.base && sp.locked){
+    for(var ac=0;ac<ACHS.length;ac++) if(ACHS[ac].gives===id) return 'ACHIEVEMENT: '+ACHS[ac].text;
+    return 'EARNED WITH AN ACHIEVEMENT';
+  }
+  if(sp.chimera){
+    for(k in CHIMERA) if(CHIMERA[k]===id){
+      var pr=k.split('+');
+      return nameOf(pr[0])+' L3  +  '+nameOf(pr[1])+' L3   (10%)';
+    }
+  }
+  if(sp.mutantOf) return 'MISMATCHED RANKS OF '+nameOf(sp.mutantOf)+'   (25%)';
+  for(k in SPECIES){
+    var par=SPECIES[k];
+    for(var ax in par.evolveTo){
+      if(par.evolveTo[ax]===id) return 'FEED '+foodForAxis(ax)+' TO '+par.name+', THEN L3 + L3';
+    }
+  }
+  return 'UNKNOWN';
+}
+function wrapText(c,str,x,y,size,col,perLine,lineH){
+  var words=str.split(' '), line='', n=0;
+  for(var i=0;i<words.length;i++){
+    if((line+words[i]).length>perLine){ text(c,line,x,y+n*lineH,size,col); n++; line=''; }
+    line+=words[i]+' ';
+  }
+  if(line.trim()) text(c,line,x,y+n*lineH,size,col);
+  return n+1;
+}
+function speciesTint(sp,known){
+  if(!known) return '#456770';
+  if(sp.rare==='LEGENDARY') return '#ffd98a';
+  if(sp.chimera||sp.mutantOf) return '#f0b8ff';
+  return '#9fe8dc';
+}
+function drawCodexCard(c){
+  var id=G.codexSel, sp=SPECIES[id], known=!!G.discovered[id];
+  panel(c,70,44,W-140,H-104,'#0a2a36');
+  var img=fishFrames(id,2)[Math.floor(G.t*8)%FRAMES];
+  var sc=Math.min(280/img.width,210/img.height,2);
+  var iw=Math.round(img.width*sc), ih=Math.round(img.height*sc);
+  var ix=Math.round(110+(280-iw)/2), iy=Math.round(70+(210-ih)/2);
+  if(known) c.drawImage(img,ix,iy,iw,ih);
+  else { c.save(); c.drawImage(img,ix,iy,iw,ih); c.globalCompositeOperation='source-atop';
+         c.fillStyle='#12313d'; c.fillRect(ix,iy,iw,ih); c.restore(); }
+  var tx=420;
+  text(c,known?sp.name:'? ? ?',tx,72,14,speciesTint(sp,known));
+  var tag = sp.rare ? sp.rare : (sp.mutantOf ? 'MUTANT' : (sp.base ? (sp.locked?'BASE SPECIES - EARNED':'BASE SPECIES') : 'EVOLVED'));
+  text(c,tag,tx,98,8,'#7fbfc8');
+  if(known) wrapText(c,sp.desc,tx,126,8,'#bfe8f0',42,14);
+  else text(c,'NOT DISCOVERED YET',tx,126,8,'#456770');
+  text(c,'HOW TO GET IT',tx,H-142,8,'#7fbfc8');
+  wrapText(c,codexHint(id),tx,H-124,8,'#ffd400',46,13);
+  panel(c,W/2-80,H-52,160,30,'#175f6d');
+  text(c,'BACK',W/2,H-43,10,'#eafffb','center');
+  BTN={back:{x:W/2-80,y:H-52,w:160,h:30}};
+}
+function drawCodex(c){
+  drawScene(c);
+  c.fillStyle='rgba(4,18,26,0.90)'; c.fillRect(0,0,W,H);
+  if(G.codexSel && SPECIES[G.codexSel]){ drawCodexCard(c); return; }
+  text(c,'CODEX  '+speciesCount()+'/'+SPECIES_ORDER.length,W/2,14,12,'#8ffff0','center');
+  for(var i=0;i<SPECIES_ORDER.length;i++){
+    var id=SPECIES_ORDER[i], sp=SPECIES[id], r=codexCell(i);
+    var known=!!G.discovered[id];
+    panel(c,r.x,r.y,r.w,r.h, known?'#0a2a36':'#08202a');
+    var img=fishFrames(id,1)[0];
+    var sc=Math.min((r.w-10)/img.width,(r.h-20)/img.height,1);
+    var iw=Math.max(2,Math.round(img.width*sc)), ih=Math.max(2,Math.round(img.height*sc));
+    var ix=Math.round(r.x+(r.w-iw)/2), iy=Math.round(r.y+2);
+    if(known) c.drawImage(img,ix,iy,iw,ih);
+    else { c.save(); c.drawImage(img,ix,iy,iw,ih); c.globalCompositeOperation='source-atop';
+           c.fillStyle='#12313d'; c.fillRect(ix,iy,iw,ih); c.restore(); }
+    var nm = known ? (sp.name.length>15 ? sp.name.slice(0,14)+'.' : sp.name) : '? ? ?';
+    text(c,nm,r.x+r.w/2,r.y+r.h-11,5,speciesTint(sp,known),'center');
+  }
+  panel(c,W/2-70,H-38,140,28,'#175f6d');
+  text(c,'BACK',W/2,H-30,10,'#eafffb','center');
+  BTN={back:{x:W/2-70,y:H-38,w:140,h:28}};
+}
+function render(){
+  var c=ctx;
+  c.clearRect(0,0,W,H);
+  if(G.scene==='menu'){ drawMenu(c); return; }
+  if(G.scene==='board'){ drawBoard(c); return; }
+  if(G.scene==='codex'){ drawCodex(c); return; }
+  drawScene(c);
+  drawUI(c);
+  drawEvent(c);
+}
+
+/* ============================================================
+   INPUT
+   ============================================================ */
+var view={sx:1,ox:0,oy:0};
+function resize(){
+  var pad=0;
+  var aw=window.innerWidth-pad, ah=window.innerHeight-pad;
+  var s=Math.min(aw/W,ah/H);
+  var dpr=Math.min(2,window.devicePixelRatio||1);
+  cv.style.width=Math.round(W*s)+'px'; cv.style.height=Math.round(H*s)+'px';
+  cv.width=Math.round(W*dpr); cv.height=Math.round(H*dpr);
+  ctx=cv.getContext('2d');
+  ctx.imageSmoothingEnabled=false;
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  view.sx=s;
+}
+function toLogical(e){
+  var r=cv.getBoundingClientRect();
+  return { x:(e.clientX-r.left)/r.width*W, y:(e.clientY-r.top)/r.height*H };
+}
+function hit(b,p){ return b && p.x>=b.x && p.x<=b.x+b.w && p.y>=b.y && p.y<=b.y+b.h; }
+function fishAt(p){
+  for(var i=G.fish.length-1;i>=0;i--){
+    var f=G.fish[i];
+    var L=RANK_LEN[f.rank];
+    if(Math.abs(p.x-f.x)<L*0.6 && Math.abs(p.y-f.y)<Math.max(14,L*0.42)) return f;
+  }
+  return null;
+}
+function onDown(e){
+  var p=toLogical(e);
+  G.ptr.x=p.x; G.ptr.y=p.y;
+  if(G.scene==='menu'){
+    if(G.confirmNew){
+      if(hit(BTN.yes,p)){ G.confirmNew=false; newGame(); G.scene='tank'; }
+      else if(hit(BTN.no,p)) G.confirmNew=false;
+      return;
+    }
+    if(hit(BTN.cont,p)){ G.scene='tank'; save(); }
+    else if(hit(BTN.newg,p)) G.confirmNew=true;
+    else if(hit(BTN.board,p)){ G.scene='board'; lbSubmit(); lbFetch(); }
+    return;
+  }
+  if(G.scene==='board'){
+    if(hit(BTN.back,p)) G.scene='menu';
+    else if(hit(BTN.week,p)) LB.tab='week';
+    else if(hit(BTN.all,p)) LB.tab='all';
+    else if(hit(BTN.refresh,p)) lbFetch();
+    return;
+  }
+  if(G.scene==='codex'){
+    if(G.codexSel){ if(hit(BTN.back,p)) G.codexSel=null; return; }
+    if(hit(BTN.back,p)){ G.scene='tank'; return; }
+    for(var ci=0;ci<SPECIES_ORDER.length;ci++){
+      if(hit(codexCell(ci),p)){ G.codexSel=SPECIES_ORDER[ci]; return; }
+    }
+    return;
+  }
+  if(G.event) return;
+  /* food tray */
+  if(G.feedOpen){
+    var ty=H-58-FOODS.length*30-8;
+    for(var i=0;i<FOODS.length;i++){
+      if(p.x>16 && p.x<256 && p.y>ty+4+i*30 && p.y<ty+30+i*30){ G.foodIdx=i; G.feedOpen=false; return; }
+    }
+  }
+  if(G.buildOpen){
+    var bty=H-58-DECOR.length*30-8;
+    for(var bj=0;bj<DECOR.length;bj++){
+      if(p.x>168 && p.x<468 && p.y>bty+4+bj*30 && p.y<bty+30+bj*30){ G.buildIdx=bj; return; }
+    }
+  }
+  if(hit(BTN.menu,p)){ G.scene='menu'; G.feedOpen=G.buildOpen=G.questsOpen=false; save(); lbSubmit(); return; }
+  if(hit(BTN.feed,p)){ G.feedOpen=!G.feedOpen; G.buildOpen=false; G.questsOpen=false; return; }
+  if(hit(BTN.build,p)){ G.buildOpen=!G.buildOpen; G.feedOpen=false; G.questsOpen=false; return; }
+  if(hit(BTN.quests,p)){ G.questsOpen=!G.questsOpen; G.feedOpen=false; G.buildOpen=false; return; }
+  if(hit(BTN.life,p)){
+    if(tankFull()) toast('TANK IS FULL - MERGE SOME FISH FIRST');
+    else if(G.spawnTimer<=0){ spawnFry(); G.spawnTimer=SPAWN_COOLDOWN; }
+    else toast('EGG NOT READY');
+    return;
+  }
+  if(hit(BTN.speed,p)){ G.speed = G.speed===1?2:(G.speed===2?4:1); return; }
+  if(hit(BTN.codex,p)){ G.scene='codex'; G.codexSel=null; return; }
+  if(p.y>H-64 || p.y<40) return;
+  if(G.buildOpen){
+    var ex=decorAt(p.x);
+    if(ex>=0 && p.y>FLOOR-140) removeDecor(ex);
+    else placeDecor(p.x);
+    return;
+  }
+  G.feedOpen=false; G.questsOpen=false;
+  var f=fishAt(p);
+  if(f && f.age>=1){ G.drag=f; f.held=true; G.dragOff.x=f.x-p.x; G.dragOff.y=f.y-p.y; }
+  else dropFood(p.x,p.y);
+}
+function onMove(e){
+  if(!G.drag) return;
+  var p=toLogical(e);
+  G.ptr.x=p.x; G.ptr.y=p.y;
+  G.drag.x=Math.max(24,Math.min(W-24,p.x+G.dragOff.x));
+  G.drag.y=Math.max(SURFACE+14,Math.min(FLOOR-8,p.y+G.dragOff.y));
+  G.drag.vx=0; G.drag.vy=0;
+}
+function onUp(){
+  if(!G.drag) return;
+  var d=G.drag; d.held=false; G.drag=null;
+  if(G.ptr.y>H-64){ releaseFish(d); return; }      // dropped on the bar = let it go
+  var best=null,bd=1e9;
+  for(var i=0;i<G.fish.length;i++){
+    var f=G.fish[i];
+    if(f===d) continue;
+    var dd=Math.hypot(f.x-d.x,f.y-d.y);
+    if(dd<bd){ bd=dd; best=f; }
+  }
+  if(best && bd<52){ if(!tryMerge(d,best)) toast('THEY MUST BE THE SAME KIND, BOTH ADULT'); }
+}
+
+/* ============================================================
+   BOOT + LOOP
+   ============================================================ */
+function newGame(){
+  G.pearls=60; G.discovered={}; G.unlocked={}; G.achs={};
+  G.stats={merges:0,mutants:0,chimeras:0,released:0};
+  G.fish=[]; G.decor=[]; G.quests=[]; G.pellets=[]; G.parts=[]; G.bubbles=[];
+  G.event=null; G.timeScale=1; G.spawnTimer=0; G.codexSel=null; G.speed=1;
+  firstFish(); fillQuests(); recalcEnv(); recalcOxygen(); save();
+}
+function firstFish(){
+  for(var i=0;i<BASE_IDS.length;i++){
+    for(var k=0;k<3;k++){
+      var f=makeFish(BASE_IDS[i],0,110+i*210+k*36,120+gameRnd()*260);
+      f.age = k<2 ? 1 : 0.4;   // two adults of each kind: a merge is possible immediately
+      G.fish.push(f);
+    }
+    discover(BASE_IDS[i]);
+  }
+  G.pearls=60;
+  recalcOxygen();
+}
+var lastT=0;
+function frame(ts){
+  try{
+    if(!lastT) lastT=ts;
+    var dt=Math.min(0.05,(ts-lastT)/1000); lastT=ts;
+    var steps = (G.scene==='tank'? G.speed:1);
+    var sdt=dt*G.timeScale;
+    for(var i=0;i<steps;i++) update(sdt);
+    render();
+  }catch(err){
+    if(typeof console!=='undefined') console.error('loop error',err);
+  }
+  requestAnimationFrame(frame);
+}
+function boot(){
+  bakeAll();
+  var had=load();
+  if(!had || !G.fish.length){ newGame(); }
+  fillQuests(); recalcEnv(); recalcOxygen(); checkAchs();
+  if(LB_URL) lbFetch();
+  resize();
+  window.addEventListener('resize',resize);
+  cv.addEventListener('pointerdown',onDown);
+  cv.addEventListener('pointermove',onMove);
+  cv.addEventListener('pointerup',onUp);
+  cv.addEventListener('pointercancel',onUp);
+  cv.addEventListener('pointerleave',onUp);
+  document.addEventListener('visibilitychange',save);
+  if(!G.name){
+    var ov=document.getElementById('nameOv');
+    ov.style.display='flex';
+    document.getElementById('nameOk').addEventListener('click',function(){
+      var v=(document.getElementById('nameIn').value||'GARDENER').trim().slice(0,14);
+      G.name=v||'GARDENER'; ov.style.display='none'; save();
+    });
+  }
+  requestAnimationFrame(frame);
+}
+/* expose for the headless test harness */
+if(typeof window!=='undefined'){
+  window.__DG={G:G,SPECIES:SPECIES,SPR:SPR,ACHS:ACHS,LOCKED_BASE:LOCKED_BASE,availableBase:availableBase,newGame:newGame,checkAchs:checkAchs,bumpStat:bumpStat,LB:LB,lbVisible:lbVisible,hasSave:hasSave,fishFrames:fishFrames,fishGlow:fishGlow,SIGNAL:SIGNAL,releaseFish:releaseFish,EVENT_T:EVENT_T,WATER:WATER,tankFull:tankFull,RANK_O2:RANK_O2,DECOR:DECOR,DECOR_MAX:DECOR_MAX,QUEST_POOL:QUEST_POOL,placeDecor:placeDecor,removeDecor:removeDecor,recalcEnv:recalcEnv,questEvent:questEvent,fillQuests:fillQuests,questDef:questDef,save:save,update:update,render:render,tryMerge:tryMerge,mergeKind:mergeKind,CHIMERA:CHIMERA,CHIMERA_CHANCE:CHIMERA_CHANCE,chimeraKey:chimeraKey,
+    makeFish:makeFish,spawnFry:spawnFry,boot:boot,recalcOxygen:recalcOxygen,
+    RANK_LEN:RANK_LEN,creatureCanvasSize:creatureCanvasSize,drawCreature:drawCreature,
+    SPECIES_ORDER:SPECIES_ORDER,addPearls:addPearls,PEARL_CAP:PEARL_CAP,load:load,FOODS:FOODS};
+}
+boot();
+
+/* ---------- PWA ----------
+   The service worker is skipped inside sandboxes (itch.io) and on localhost:
+   there it only fights the host. index.html is network-first inside sw.js,
+   otherwise an update never reaches a phone that already has the app. */
+try{
+  var host = (window.location && window.location.hostname) || '';
+  var proto = (window.location && window.location.protocol) || '';
+  var USE_SW = proto==='https:' && !/itch|localhost|127\.0\.0\.1/.test(host);
+  if(USE_SW && typeof navigator!=='undefined' && navigator.serviceWorker){
+    window.addEventListener('load',function(){
+      navigator.serviceWorker.register('./sw.js').catch(function(){});
+    });
+  }
+}catch(e){}
+})();
+</script>
+</body>
+</html>
