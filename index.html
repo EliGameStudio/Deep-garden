@@ -47,7 +47,7 @@
    Phase 1: core loop (swim / feed / grow / breed / merge / evolve)
    ============================================================ */
 
-var VERSION = 'v3.3';
+var VERSION = 'v3.4';
 var W = 960, H = 540;
 var SAVE_KEY = 'deepgarden_save_v1';
 var FLOOR = 476;          // substrate top
@@ -370,7 +370,7 @@ function sfx(kind){
 /* ---------- CLOUD LEADERBOARD (Firebase REST) ----------
    Paste your database URL below. Use a NEW node for this game so it never mixes
    with an older one. Leave it empty and the game simply runs offline. */
-var LB_URL = '';   // e.g. 'https://YOUR-DB.firebaseio.com/scores_aqua1.json'
+var LB_URL = 'https://deepgarden-b2709-default-rtdb.europe-west1.firebasedatabase.app/scores_aqua1.json';
 var LB = { status:'Offline', rows:[], tab:'all', t:0, sending:false };
 function lbSubmit(){
   if(!LB_URL || !G.name) return;
