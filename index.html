@@ -47,7 +47,7 @@
    Phase 1: core loop (swim / feed / grow / breed / merge / evolve)
    ============================================================ */
 
-var VERSION = 'v2.2';
+var VERSION = 'v3.3';
 var W = 960, H = 540;
 var SAVE_KEY = 'deepgarden_save_v1';
 var FLOOR = 476;          // substrate top
@@ -56,6 +56,7 @@ var PEARL_CAP = 99999;
 var SPAWN_COOLDOWN = 30;  // seconds, NEW LIFE button
 var FRAMES = 6;           // swim animation frames
 var EVENT_T = 1.5;        // how long a discovery card holds the screen, seconds
+var RIPEN = 60;           // seconds an adult needs before it will pair up on its own
 
 /* ---------- 1. PIXEL PRIMITIVES (PIXEL_ART_SPEC §1) ---------- */
 function rp(c,x,y,w,h,col){ c.fillStyle=col; c.fillRect(x|0,y|0,Math.max(1,w|0),Math.max(1,h|0)); }
@@ -97,6 +98,20 @@ function dome(c,cx,baseY,rx,ry,col){
     c.fillRect(cx-w, baseY-y, 2*w+1, 1);
   }
 }
+/* flatEll: an ellipse whose bottom is cut off at an absolute y.
+   A bottom-dweller needs a flat belly - but the belly must be exactly as wide as
+   the body is at that height, or it sticks out past the silhouette like a plank. */
+function flatEll(c,cx,cy,rx,ry,cutY,col){
+  cx|=0; cy|=0; rx=Math.round(rx); ry=Math.round(ry); cutY=Math.round(cutY);
+  if(rx<1||ry<1) return;
+  c.fillStyle=col;
+  for(var y=-ry;y<=ry;y++){
+    if(cy+y>cutY) break;
+    var w=Math.floor(rx*Math.sqrt(Math.max(0,1-(y*y)/(ry*ry))));
+    c.fillRect(cx-w,cy+y,2*w+1,1);
+  }
+}
+
 /* spike: a triangle growing UP from a base (tri() points sideways) */
 function spike(c,cx,baseY,halfW,height,tipDx,col){
   cx|=0; baseY|=0; height=Math.max(1,Math.round(height));
@@ -136,6 +151,220 @@ function makeSprite(w,h,draw){
   var x=c.getContext('2d');
   draw(x,c.width,c.height);
   return c;
+}
+
+/* ============================================================
+   SOUND - WebAudio synthesis, no files (template §5)
+   Rules that are not negotiable:
+   - AudioContext is created ONLY after the first touch (iOS)
+   - start() ALWAYS before stop(), or sound dies on a real device
+   - no audio available -> silent fallback, the game never crashes
+   ============================================================ */
+var AU = { ctx:null, master:null, delay:null, wet:null, muted:false,
+           nextStep:0, step:0, bpm:58, breathe:0, dead:false };
+
+/* iOS mutes WebAudio when the physical Ring/Silent switch is on - the volume buttons
+   do nothing about it. Playing an HTMLAudioElement moves the session to the
+   'playback' category, and then WebAudio is heard regardless of the switch.
+   The silent wav is built in code: no external asset. */
+function unlockSession(){
+  try{
+    if(AU.el || typeof Blob==='undefined') return;
+    var sr=8000, n=Math.round(sr*0.2), buf=new ArrayBuffer(44+n*2), v=new DataView(buf);
+    function w(o,str){ for(var i=0;i<str.length;i++) v.setUint8(o+i,str.charCodeAt(i)); }
+    w(0,'RIFF'); v.setUint32(4,36+n*2,true); w(8,'WAVE'); w(12,'fmt ');
+    v.setUint32(16,16,true); v.setUint16(20,1,true); v.setUint16(22,1,true);
+    v.setUint32(24,sr,true); v.setUint32(28,sr*2,true); v.setUint16(32,2,true); v.setUint16(34,16,true);
+    w(36,'data'); v.setUint32(40,n*2,true);
+    var el=document.createElement('audio');
+    el.src=URL.createObjectURL(new Blob([buf],{type:'audio/wav'}));
+    el.loop=true; el.volume=0.001;
+    el.setAttribute('playsinline','');
+    el.setAttribute('webkit-playsinline','');
+    var pr=el.play();
+    if(pr && pr.catch) pr.catch(function(){});
+    AU.el=el;
+  }catch(e){}
+}
+function audioReady(){ return !!(AU.ctx && AU.ctx.state==='running'); }
+function audioInit(){
+  if(AU.ctx || AU.dead) return;
+  try{
+    unlockSession();
+    var C = window.AudioContext || window.webkitAudioContext;
+    if(!C){ AU.dead=true; return; }
+    AU.ctx = new C();
+    AU.master = AU.ctx.createGain();
+    AU.master.gain.value = AU.muted ? 0 : 0.5;
+    AU.master.connect(AU.ctx.destination);
+    /* a little space, so the tank does not sound like a phone speaker */
+    AU.delay = AU.ctx.createDelay(1.0);
+    AU.delay.delayTime.value = 0.42;
+    var fb = AU.ctx.createGain(); fb.gain.value = 0.30;
+    AU.wet = AU.ctx.createGain(); AU.wet.gain.value = 0.30;
+    AU.delay.connect(fb); fb.connect(AU.delay);
+    AU.delay.connect(AU.wet); AU.wet.connect(AU.master);
+    AU.nextStep = AU.ctx.currentTime + 0.1;
+    if(AU.ctx.state==='suspended' && AU.ctx.resume) AU.ctx.resume();
+  }catch(e){ AU.ctx=null; AU.dead=true; }
+}
+/* Any first gesture counts, not just one on the canvas: the name overlay is a DOM
+   button, and some browsers do not deliver pointerdown at all. */
+function armAudio(){
+  audioInit();
+  if(AU.ctx && AU.ctx.state==='suspended'){ try{ AU.ctx.resume(); }catch(e){} }
+  if(AU.el && AU.el.paused){ try{ var p=AU.el.play(); if(p&&p.catch) p.catch(function(){}); }catch(e){} }
+}
+function audioMute(m){
+  AU.muted=m;
+  if(AU.master && AU.ctx){
+    try{ AU.master.gain.setTargetAtTime(m?0:0.5, AU.ctx.currentTime, 0.05); }catch(e){}
+  }
+  save();
+}
+/* one note = two slightly detuned oscillators through a shared filter (template §5) */
+function voice(freq,t,dur,o){
+  if(!AU.ctx || AU.muted) return;
+  o=o||{};
+  try{
+    var g=AU.ctx.createGain(), f=AU.ctx.createBiquadFilter();
+    f.type='lowpass'; f.frequency.value=o.cut||1400; f.Q.value=o.q||0.6;
+    var a=AU.ctx.createOscillator(), b=AU.ctx.createOscillator();
+    a.type=o.type||'sine'; b.type=o.type||'sine';
+    a.frequency.value=freq; b.frequency.value=freq;
+    a.detune.value=-(o.detune===undefined?7:o.detune);
+    b.detune.value= (o.detune===undefined?7:o.detune);
+    a.connect(f); b.connect(f); f.connect(g);
+    g.connect(AU.master);
+    if(AU.delay && o.wet!==false) g.connect(AU.delay);
+    var att=o.att||0.03, rel=o.rel||0.5, pk=o.gain||0.12;
+    g.gain.setValueAtTime(0.0001,t);
+    g.gain.exponentialRampToValueAtTime(pk,t+att);
+    g.gain.exponentialRampToValueAtTime(0.0001,t+dur+rel);
+    a.start(t); b.start(t);                       // start BEFORE stop, always
+    a.stop(t+dur+rel+0.05); b.stop(t+dur+rel+0.05);
+  }catch(e){}
+}
+/* percussion out of filtered noise */
+var NOISEBUF=null;
+function noiseBuf(){
+  if(NOISEBUF || !AU.ctx) return NOISEBUF;
+  try{
+    var n=AU.ctx.sampleRate*1.0, b=AU.ctx.createBuffer(1,n,AU.ctx.sampleRate), d=b.getChannelData(0);
+    var r=mulberry32(0x5011);
+    for(var i=0;i<n;i++) d[i]=r()*2-1;
+    NOISEBUF=b;
+  }catch(e){}
+  return NOISEBUF;
+}
+function hit(t,dur,cut,gain,type){
+  if(!AU.ctx || AU.muted) return;
+  var buf=noiseBuf(); if(!buf) return;
+  try{
+    var src=AU.ctx.createBufferSource(); src.buffer=buf; src.loop=true;
+    var f=AU.ctx.createBiquadFilter(); f.type=type||'bandpass'; f.frequency.value=cut; f.Q.value=1.2;
+    var g=AU.ctx.createGain();
+    src.connect(f); f.connect(g); g.connect(AU.master);
+    g.gain.setValueAtTime(gain||0.10,t);
+    g.gain.exponentialRampToValueAtTime(0.0001,t+dur);
+    src.start(t); src.stop(t+dur+0.02);           // start BEFORE stop
+  }catch(e){}
+}
+
+/* ---- the tank theme: lydian, slow, layered ---- */
+var SC = [0,2,4,6,7,9,11];                        // set from the biome: each place has its own mode AND tempo
+function hz(deg,oct){
+  var n=SC[((deg%7)+7)%7] + 12*(oct + Math.floor(deg/7) + (G.biome?biomeDef(G.biome).oct:0));
+  return 55*Math.pow(2,(n+3)/12);
+}
+var MEL = [0,2,4,2, 6,4,2,0, 3,5,4,2, 1,0,-2,0];
+function musicStep(st,t){
+  var bar = Math.floor(st/8) % 8;
+  var live = G.fish.length;
+  var busy = Math.min(1, live/18);
+  var known = speciesCount();
+
+  /* bass: always there */
+  if(st%8===0) voice(hz(bar%3===2?3:0,1), t, 1.6, {type:'triangle',gain:0.10,cut:420,rel:0.9});
+  /* pad: a held chord every two bars */
+  if(st%16===0){
+    var root=(bar%4===3)?3:(bar%4===2?4:0);
+    voice(hz(root,2), t, 3.2, {type:'sine',gain:0.045,cut:900,att:0.6,rel:1.6});
+    voice(hz(root+2,2), t, 3.2, {type:'sine',gain:0.035,cut:900,att:0.8,rel:1.6});
+    voice(hz(root+4,2), t, 3.2, {type:'sine',gain:0.03,cut:900,att:1.0,rel:1.6});
+  }
+  /* melody */
+  if(st%2===0){
+    var d=MEL[(st/2)%MEL.length];
+    voice(hz(d,3), t, 0.5, {type:'sine',gain:0.075,cut:1800,rel:0.7});
+    /* a harmony voice a third above once the tank is alive */
+    if(busy>0.35) voice(hz(d+2,3), t+0.02, 0.5, {type:'sine',gain:0.032,cut:1500,rel:0.7});
+  }
+  /* arpeggio when the tank is crowded */
+  if(busy>0.55 && st%1===0 && st%8!==0)
+    voice(hz((st*3)%7,3), t, 0.14, {type:'triangle',gain:0.028,cut:2400,rel:0.25});
+  /* airy shimmer as the codex fills - the reward for progress */
+  if(known>8 && st%32===0)
+    voice(hz(6,4), t, 2.0, {type:'sine',gain:0.03,cut:4000,att:0.9,rel:1.8});
+  /* soft pulse instead of drums: this is a place to relax, not to march */
+  if(st%8===0) hit(t,0.25,180,0.05*busy,'lowpass');
+  if(busy>0.5 && st%8===4) hit(t,0.10,1800,0.018,'bandpass');
+}
+function musicTick(){
+  if(!AU.ctx || AU.muted) return;
+  try{
+    var now=AU.ctx.currentTime, spb=60/AU.bpm/2;
+    if(AU.nextStep < now) AU.nextStep = now + 0.05;
+    while(AU.nextStep < now + 0.3){
+      musicStep(AU.step, AU.nextStep);
+      AU.step++; AU.nextStep += spb;
+    }
+    /* dynamics: the mix breathes over 8 bars, or the loop goes flat */
+    AU.breathe += 0.016;
+    AU.master.gain.setTargetAtTime((AU.muted?0:0.5)*(0.85+Math.sin(AU.breathe*0.06)*0.15), now, 0.4);
+  }catch(e){}
+}
+
+/* ---- stingers ---- */
+function sfx(kind){
+  if(!AU.ctx || AU.muted) return;
+  var t=AU.ctx.currentTime, i;
+  if(kind==='feed')        voice(hz(4,4),t,0.05,{type:'sine',gain:0.05,cut:3000,rel:0.10,wet:false});
+  else if(kind==='merge'){ voice(hz(0,3),t,0.10,{type:'triangle',gain:0.09,cut:2200,rel:0.2});
+                           voice(hz(4,3),t+0.09,0.14,{type:'triangle',gain:0.09,cut:2600,rel:0.3}); }
+  else if(kind==='rank'){  for(i=0;i<3;i++) voice(hz(i*2,3),t+i*0.07,0.12,{type:'sine',gain:0.08,cut:2600,rel:0.3}); }
+  else if(kind==='evolve'){for(i=0;i<5;i++) voice(hz(i*2,3),t+i*0.09,0.22,{type:'sine',gain:0.09,cut:3200,rel:0.6}); }
+  else if(kind==='discover'){                        // triumphant passage
+    var d=[0,2,4,6,7];
+    for(i=0;i<d.length;i++) voice(hz(d[i],3),t+i*0.10,0.30,{type:'triangle',gain:0.10,cut:3400,rel:0.8});
+    voice(hz(7,4),t+0.5,0.9,{type:'sine',gain:0.06,cut:4000,att:0.1,rel:1.2});
+    hit(t,0.4,120,0.10,'lowpass');
+  }
+  else if(kind==='mutant'){                          // uneasy: a tritone, then a low thud
+    voice(hz(0,2),t,0.7,{type:'sawtooth',gain:0.05,cut:600,rel:0.8});
+    voice(hz(3,2),t,0.7,{type:'sawtooth',gain:0.05,cut:600,rel:0.8});
+    voice(hz(3,4),t+0.15,0.3,{type:'triangle',gain:0.05,cut:3000,rel:0.6});
+    hit(t,0.5,90,0.14,'lowpass');
+  }
+  else if(kind==='chimera'){                         // the big one
+    for(i=0;i<7;i++) voice(hz(i,3),t+i*0.07,0.5,{type:'triangle',gain:0.09,cut:4000,rel:1.2});
+    voice(hz(0,4),t+0.6,1.6,{type:'sine',gain:0.08,cut:5000,att:0.1,rel:2.0});
+    hit(t,0.7,110,0.16,'lowpass'); hit(t+0.6,0.5,2600,0.05,'bandpass');
+  }
+  else if(kind==='fail'){                            // tense descending chord + a roll
+    for(i=0;i<4;i++) voice(hz(6-i*2,2),t+i*0.11,0.4,{type:'sawtooth',gain:0.05,cut:700,rel:0.7});
+    for(i=0;i<6;i++) hit(t+i*0.05,0.06,320,0.05,'lowpass');
+  }
+  else if(kind==='quest')  { for(i=0;i<3;i++) voice(hz(4+i*2,3),t+i*0.08,0.2,{type:'sine',gain:0.07,cut:3000,rel:0.5}); }
+  else if(kind==='ach'){                             // a milestone deserves a fanfare
+    var a=[0,4,7,11];
+    for(i=0;i<a.length;i++) voice(hz(a[i],3),t+i*0.11,0.5,{type:'triangle',gain:0.10,cut:3600,rel:1.0});
+    hit(t,0.5,140,0.12,'lowpass');
+  }
+  else if(kind==='release'){ voice(hz(4,3),t,0.4,{type:'sine',gain:0.05,cut:2200,att:0.05,rel:0.9});
+                             voice(hz(6,4),t+0.1,0.5,{type:'sine',gain:0.03,cut:3600,rel:1.0}); }
+  else if(kind==='decor')  { voice(hz(0,2),t,0.2,{type:'triangle',gain:0.07,cut:800,rel:0.4}); hit(t,0.15,240,0.06,'lowpass'); }
+  else if(kind==='nope')   { voice(hz(0,2),t,0.12,{type:'square',gain:0.04,cut:500,rel:0.2}); }
 }
 
 /* ---------- CLOUD LEADERBOARD (Firebase REST) ----------
@@ -491,6 +720,41 @@ function availableBase(){
   return a;
 }
 
+/* ---------- BIOMES ----------
+   Section 8 of the brief is blunt: a repaint is not new content. So every biome
+   brings its OWN substrate, its OWN far/mid/near layers, its OWN geometry and its
+   OWN music - different mode AND tempo, not just a different timbre.
+   pond = rolling hills, reef = a pierced wall and domes, kelp = vertical columns,
+   trench = two converging walls and spires. ---------- */
+var BIOMES = [
+  { id:'pond', name:'FRESHWATER POND', cost:0, axes:{BLOOM:1},
+    water:['#0a3341','#0f4a59','#156373','#1d808e','#269dab'],
+    far:['#0e4a5a','#125868'], mid:['#0c3e4c','#105260','#156270'],
+    floor:['#2a3f4a','#3e606d','#57808b','#78a0a8'], front:'#08303c',
+    rays:0.055, caustic:1, surface:1, bpm:58, scale:[0,2,4,6,7,9,11], oct:0,
+    desc:'Where every garden starts.' },
+  { id:'reef', name:'CORAL REEF', cost:200, axes:{LUMEN:1,BLOOM:1},
+    water:['#0e4a52','#166a6e','#1f8c86','#2fae9a','#48ceac'],
+    far:['#125c5e','#1a706c'], mid:['#134e50','#1a6462','#237a72'],
+    floor:['#5a5240','#8a7c5e','#b8a67e','#e0cfa2'], front:'#0d4a44',
+    rays:0.075, caustic:1.4, surface:1, bpm:72, scale:[0,2,4,5,7,9,11], oct:0,
+    desc:'Bright, shallow, crowded with light.' },
+  { id:'kelp', name:'KELP FOREST', cost:200, axes:{BLOOM:2},
+    water:['#0a2f2a','#0f4a3c','#166350','#1f8064','#2a9c78'],
+    far:['#0c3a30','#12503e'], mid:['#0a3428','#0f4636','#155a44'],
+    floor:['#2c3a2a','#41563a','#5c744c','#7f9a64'], front:'#06241c',
+    rays:0.040, caustic:0.5, surface:1, bpm:52, scale:[0,2,3,5,7,9,10], oct:0,
+    desc:'Green columns, dappled light, slow water.' },
+  { id:'trench', name:'DEEP TRENCH', cost:300, axes:{ABYSS:2,ARMOR:1},
+    water:['#050a12','#08101c','#0c1826','#122234','#1a2e44'],
+    far:['#070e18','#0b1524'], mid:['#060c14','#0a1220','#0e1a2c'],
+    floor:['#0c1018','#161e2a','#232e3e','#354456'], front:'#03070d',
+    rays:0, caustic:0, surface:0, bpm:42, scale:[0,1,3,5,7,8,10], oct:-1,
+    desc:'No sun reaches this far. Nothing here has eyes.' }
+];
+function biomeDef(id){ for(var i=0;i<BIOMES.length;i++) if(BIOMES[i].id===id) return BIOMES[i]; return BIOMES[0]; }
+function biome(){ return biomeDef(G.biome); }
+
 /* ---------- DECOR: the slow lever. Food steers one fish now, decor steers the
      whole tank forever. Each piece pushes one axis and most of them breathe out oxygen. ---------- */
 var DECOR = [
@@ -515,11 +779,11 @@ function decorDef(id){ for(var i=0;i<DECOR.length;i++) if(DECOR[i].id===id) retu
 /* ---------- 8. FOOD ---------- */
 var FOODS = [
   {id:'flakes', name:'FLAKES',       cost:0,  axis:null,     col:'#e8c06a', desc:'free'},
-  {id:'glow',   name:'GLOW PLANKTON',cost:20, axis:'LUMEN',  col:'#8fe8ff', desc:'light'},
-  {id:'algae',  name:'ALGAE WAFER',  cost:20, axis:'BLOOM',  col:'#7fd05a', desc:'plants'},
-  {id:'grit',   name:'MINERAL GRIT', cost:20, axis:'ARMOR',  col:'#b6b6c2', desc:'armour'},
-  {id:'worm',   name:'BLOODWORM',    cost:20, axis:'FLOW',   col:'#e0525a', desc:'speed'},
-  {id:'krill',  name:'BLACK KRILL',  cost:20, axis:'ABYSS',  col:'#5a4f7a', desc:'deep'}
+  {id:'glow',   name:'GLOW PLANKTON',cost:8,  axis:'LUMEN',  col:'#8fe8ff', desc:'light'},
+  {id:'algae',  name:'ALGAE WAFER',  cost:8,  axis:'BLOOM',  col:'#7fd05a', desc:'plants'},
+  {id:'grit',   name:'MINERAL GRIT', cost:8,  axis:'ARMOR',  col:'#b6b6c2', desc:'armour'},
+  {id:'worm',   name:'BLOODWORM',    cost:8,  axis:'FLOW',   col:'#e0525a', desc:'speed'},
+  {id:'krill',  name:'BLACK KRILL',  cost:8,  axis:'ABYSS',  col:'#5a4f7a', desc:'deep'}
 ];
 
 /* ---------- QUESTS: something to aim at. Auto-claimed, then replaced. ---------- */
@@ -544,6 +808,70 @@ var ACHS = [
   {id:'a_merge60',  text:'MERGE 60 TIMES',        stat:'merges',   goal:60, gives:'snail'},
   {id:'a_chimera',  text:'CROSS TWO MUTANTS INTO A CHIMERA', stat:'chimeras', goal:1, gives:'seahorse'}
 ];
+
+/* ---------- TIPS: the game has to explain itself ----------
+   Every lever we built is invisible: that food steers evolution, that a grotto
+   pulls a whole tank toward ABYSS, that mismatched ranks make mutants. A child
+   will not guess any of it. So: one card at a time, fired by what just happened,
+   pointing at the button it talks about. Shown once, then remembered forever. */
+var TIPS = [
+  { id:'feed',   at:null,     text:'TAP THE WATER TO DROP FOOD',
+    sub:'A HUNGRY FISH WILL NOT GROW UP',
+    when:function(){ return G.frames>200 && (G.stats.fed||0)===0; } },
+  { id:'grown',  at:null,     text:'THAT ONE IS ALL GROWN UP',
+    sub:'THE LITTLE BAR ABOVE IT IS A ONE MINUTE TIMER',
+    when:function(){ return anyFish(function(f){ return f.age>=1 && f.ripe>0 && f.ripe<RIPEN-2; }); } },
+  { id:'ready',  at:null,     text:'THE CHAIN LINKS MEAN: READY',
+    sub:'TWO READY FISH OF THE SAME KIND WILL PAIR UP ON THEIR OWN',
+    when:function(){ return anyFish(function(f){ return f.ready; }); } },
+  { id:'drag',   at:null,     text:'YOU DO NOT HAVE TO WAIT',
+    sub:'DRAG ONE GROWN FISH ONTO ANOTHER OF THE SAME KIND',
+    when:function(){ return (G.stats.merges||0)===0 && twoAdultsAlike(); } },
+  { id:'food',   at:'feed',   text:'SPECIAL FOOD DECIDES WHAT THEY BECOME',
+    sub:'GLOW PLANKTON MAKES LIGHT. ALGAE MAKES GARDENS. YOUR CHOICE.',
+    when:function(){ return (G.stats.merges||0)>=2; } },
+  { id:'build',  at:'build',  text:'PLANTS AND ROCKS LEAN THE WHOLE TANK',
+    sub:'AND THEY KEEP LEANING IT, LONG AFTER YOU STOP FEEDING',
+    when:function(){ return (G.stats.merges||0)>=6; } },
+  { id:'l3',     at:null,     text:'RANK 3. TWO OF THESE WILL EVOLVE INTO SOMETHING NEW',
+    sub:'WHAT THEY ATE DECIDES WHICH WAY THE BRANCH GOES',
+    when:function(){ return anyFish(function(f){ return f.rank===2; }); } },
+  { id:'mutant', at:null,     text:'DRAG DIFFERENT RANKS TOGETHER ON PURPOSE',
+    sub:'25% YOU GET A MUTANT. THE YELLOW RING MEANS THAT CHANCE.',
+    when:function(){ return (G.stats.merges||0)>=4 && anyFish(function(f){ return f.rank>0; }); } },
+  { id:'chim',   at:null,     text:'TWO GROWN MUTANTS: 10% A CHIMERA, 90% YOU LOSE BOTH',
+    sub:'THE RED RING IS THE WARNING. THE GAME WILL NEVER DO IT FOR YOU.',
+    when:function(){ return (G.stats.mutants||0)>=1; } },
+  { id:'codex',  at:'codex',  text:'THE CODEX TELLS YOU HOW EVERY CREATURE IS MADE',
+    sub:'EVEN THE ONES YOU HAVE NEVER SEEN',
+    when:function(){ return speciesCount()>=6; } }
+];
+function anyFish(fn){ for(var i=0;i<G.fish.length;i++) if(fn(G.fish[i])) return true; return false; }
+function twoAdultsAlike(){
+  for(var i=0;i<G.fish.length;i++) for(var j=i+1;j<G.fish.length;j++){
+    var k=mergeKind(G.fish[i],G.fish[j]);
+    if(k==='rank'||k==='evolve') return true;
+  }
+  return false;
+}
+function tipTick(dt){
+  if(G.scene!=='tank' || G.event) return;
+  if(G.tip){ G.tip.t-=dt; if(G.tip.t<=0){ G.tips[G.tip.id]=true; G.tip=null; G.tipGap=3.5; save(); } return; }
+  if(G.tipGap>0){ G.tipGap-=dt; return; }
+  for(var i=0;i<TIPS.length;i++){
+    var t=TIPS[i];
+    if(G.tips[t.id]) continue;
+    var ok=false;
+    try{ ok=t.when(); }catch(e){ ok=false; }
+    if(ok){ G.tip={ id:t.id, t:9 }; return; }
+  }
+}
+function tipDef(id){ for(var i=0;i<TIPS.length;i++) if(TIPS[i].id===id) return TIPS[i]; return null; }
+function dismissTip(){
+  if(!G.tip) return false;
+  G.tips[G.tip.id]=true; G.tip=null; G.tipGap=3.5; save();
+  return true;
+}
 
 /* ---------- 9. RANKS ---------- */
 var RANK_LEN = [50,80,116];
@@ -722,12 +1050,18 @@ function drawCreature(c,sp,rank,frame){
       px(c,hxx+i2, by-Math.round(ry*0.4)-Math.round(Math.sin(i2*0.16+ph)*L*0.05), P[0]);
       px(c,hxx+i2, by-Math.round(ry*0.1)+Math.round(i2*0.16), P[0]);
     }
+  } else if(sp.body==='flat'){
+    /* flat belly, arched back - the shape of a fish that lives on the floor */
+    var bl=Math.round(by+ry*0.55);
+    flatEll(c,cx,by,rx+1,ry+1,bl+1,P[0]);
+    flatEll(c,cx,by,rx,ry,bl,P[1]);
+    flatEll(c,cx-1,by-1,rx-2,ry-2,bl-1,P[2]);
+    if(detail>0) flatEll(c,cx-2,by-2,rx-4,ry-4,bl-2,P[3]);
   } else {
     ell(c,cx,by,rx+1,ry+1,P[0]);
     ell(c,cx,by,rx,ry,P[1]);
     ell(c,cx-1,by-1,rx-2,ry-2,P[2]);
     if(detail>0) ell(c,cx-2,by-2,rx-4,ry-4,P[3]);
-    if(sp.body==='flat'){ rp(c,cx-rx,by+ry-1,rx*2,2,P[1]); rp(c,cx-rx,by+ry,rx*2,1,P[0]); }
   }
   var oddBody = (sp.body==='snail'||sp.body==='bell'||sp.body==='horse'||sp.body==='shrimp');
 
@@ -932,88 +1266,244 @@ function bakeFood(){
 }
 
 /* water background: value noise + dithering, no flat fills (PIXEL_ART_SPEC §5) */
-var WATER = ['#0a3341','#0f4a59','#156373','#1d808e','#269dab'];
 function bakeBackground(){
+  var B0=biome(), WATER=B0.water;
   var rnd=mulberry32(0xA11CE), wv=makeWaves(rnd,4);
   SPR.bg = makeSprite(W,H,function(c){
     var B=3;
     for(var y=0;y<H;y+=B){
       for(var x=0;x<W;x+=B){
-        var depth = 1 - (y/H);                 // brighter near surface
-        var n = noise(wv,x,y)*0.22 + (rnd()-0.5)*0.14;  // dithering
+        var depth = 1 - (y/H);
+        var n = noise(wv,x,y)*0.22 + (rnd()-0.5)*0.14;
         var v = depth*1.5 + n - 0.35;
         var s = step(v*2-1,WATER.length);
         rp(c,x,y,Math.min(B,W-x),B,WATER[s]);
       }
     }
-    // surface band
-    for(var x2=0;x2<W;x2++){
-      var hh = 2 + Math.round(Math.sin(x2*0.05)*1.5 + Math.sin(x2*0.017)*1.5);
-      rp(c,x2,SURFACE-6+hh,1,3,'#3ab4c0');
-      rp(c,x2,SURFACE-3+hh,1,2,'#7fe0e0');
+    if(B0.surface){
+      for(var x2=0;x2<W;x2++){
+        var hh = 2 + Math.round(Math.sin(x2*0.05)*1.5 + Math.sin(x2*0.017)*1.5);
+        rp(c,x2,SURFACE-6+hh,1,3,'#3ab4c0');
+        rp(c,x2,SURFACE-3+hh,1,2,'#7fe0e0');
+      }
+    } else {
+      /* no surface down here - just the dark closing over you */
+      for(var x3=0;x3<W;x3+=2){
+        for(var y3=0;y3<SURFACE+40;y3+=2){
+          if(rnd()<0.25) rp(c,x3,y3,2,2,'#04070e');
+        }
+      }
     }
   });
 }
-function bakeLayer(seedv,topY,tones,amp,mode){
-  var rnd=mulberry32(seedv), wv=makeWaves(rnd,3);
-  return makeSprite(W,H,function(c){
-    var B = (mode==='far')?3:2;
-    for(var x=0;x<W;x+=B){
-      var hgt = topY + noise(wv,x*2,0)*amp;
-      for(var y=Math.round(hgt);y<FLOOR+40;y+=B){
-        var n=noise(wv,x,y)*0.5+(rnd()-0.5)*0.14;
-        var s=step(n,tones.length);
-        rp(c,x,y,Math.min(B,W-x),Math.min(B,FLOOR+40-y),tones[s]);
+/* FAR LAYER - the shape of the horizon is what makes a place a place */
+function bakeFar(){
+  var B0=biome(), T=B0.far;
+  var rnd=mulberry32(0xFA71), wv=makeWaves(rnd,3);
+  SPR.far = makeSprite(W,H,function(c){
+    var x,y,n,s2;
+    if(B0.id==='pond'){                      /* rolling hills */
+      for(x=0;x<W;x+=3){
+        var h1 = 300 + noise(wv,x*2,0)*40;
+        for(y=Math.round(h1);y<FLOOR+40;y+=3){
+          n=noise(wv,x,y)*0.5+(rnd()-0.5)*0.14;
+          rp(c,x,y,Math.min(3,W-x),Math.min(3,FLOOR+40-y),T[step(n,T.length)]);
+        }
       }
+    } else if(B0.id==='reef'){                /* a wall pierced with arches */
+      for(x=0;x<W;x+=3){
+        var h2 = 250 + noise(wv,x*1.5,0)*70;
+        for(y=Math.round(h2);y<FLOOR+40;y+=3){
+          var hole = noise(wv,x*3+100,y*3);
+          if(hole>0.42) continue;             /* the holes ARE the reef */
+          n=noise(wv,x,y)*0.5+(rnd()-0.5)*0.14;
+          rp(c,x,y,Math.min(3,W-x),Math.min(3,FLOOR+40-y),T[step(n,T.length)]);
+        }
+      }
+    } else if(B0.id==='kelp'){                /* a canopy overhead, strands hanging down */
+      for(x=0;x<W;x+=3) for(y=SURFACE;y<SURFACE+70;y+=3){
+        n=noise(wv,x,y*2)*0.6+(rnd()-0.5)*0.14;
+        if(n>-0.2) rp(c,x,y,3,3,T[step(n,T.length)]);
+      }
+      for(var k=0;k<22;k++){
+        var sx=Math.round(rnd()*W), len=120+rnd()*260;
+        for(y=SURFACE+40;y<SURFACE+40+len;y+=3){
+          var xo=Math.round(Math.sin(y*0.02+k)*10);
+          rp(c,sx+xo,y,4,3,T[y%6<3?0:1]);
+        }
+      }
+    } else {                                  /* trench: two walls closing in */
+      for(y=0;y<FLOOR+40;y+=3){
+        var t=y/(FLOOR+40);
+        var lw = Math.round(60 + t*210 + noise(wv,0,y*2)*40);
+        var rw = Math.round(60 + t*210 + noise(wv,500,y*2)*40);
+        for(x=0;x<lw;x+=3){ n=noise(wv,x,y)*0.5+(rnd()-0.5)*0.14; rp(c,x,y,3,3,T[step(n,T.length)]); }
+        for(x=W-rw;x<W;x+=3){ n=noise(wv,x,y)*0.5+(rnd()-0.5)*0.14; rp(c,x,y,Math.min(3,W-x),3,T[step(n,T.length)]); }
+      }
+    }
+  });
+}
+/* MID LAYER - the geometry the eye actually reads */
+function bakeMid(){
+  var B0=biome(), T=B0.mid;
+  var rnd=mulberry32(0x31D2), wv=makeWaves(rnd,3);
+  SPR.mid = makeSprite(W,H,function(c){
+    var x,y,n,i;
+    if(B0.id==='pond'){
+      for(x=0;x<W;x+=2){
+        var h1 = 392 + noise(wv,x*2,0)*28;
+        for(y=Math.round(h1);y<FLOOR+40;y+=2){
+          n=noise(wv,x,y)*0.5+(rnd()-0.5)*0.14;
+          rp(c,x,y,Math.min(2,W-x),Math.min(2,FLOOR+40-y),T[step(n,T.length)]);
+        }
+      }
+    } else if(B0.id==='reef'){                /* rounded coral heads */
+      for(i=0;i<14;i++){
+        var cx=Math.round(rnd()*W), r=26+Math.round(rnd()*54);
+        dome(c,cx,FLOOR,r,r,T[0]);
+        dome(c,cx,FLOOR,r-3,r-4,T[1]);
+        dome(c,cx-2,FLOOR,Math.round(r*0.6),Math.round(r*0.7),T[2]);
+        for(var q=0;q<50;q++) px(c,cx-r+Math.round(rnd()*r*2),FLOOR-Math.round(rnd()*r),T[rnd()<0.5?0:2]);
+      }
+    } else if(B0.id==='kelp'){                /* vertical columns, floor to canopy */
+      for(i=0;i<20;i++){
+        var kx=Math.round(rnd()*W), kw=5+Math.round(rnd()*9);
+        for(y=FLOOR;y>SURFACE+30;y-=2){
+          var xo=Math.round(Math.sin(y*0.014+i)*16);
+          rp(c,kx+xo-kw,y,kw*2,2,T[0]);
+          rp(c,kx+xo-kw+2,y,Math.max(1,kw),2,T[1]);
+          if(y%14===0){ rp(c,kx+xo-kw-6,y,6,3,T[2]); rp(c,kx+xo+kw,y,6,3,T[2]); }
+        }
+      }
+    } else {                                  /* trench: spires off the floor */
+      for(i=0;i<11;i++){
+        var sx2=Math.round(rnd()*W), sh=90+Math.round(rnd()*230), sw=8+Math.round(rnd()*16);
+        for(y=FLOOR;y>FLOOR-sh;y-=2){
+          var t2=(FLOOR-y)/sh, ww=Math.max(2,Math.round(sw*(1-t2*0.85)));
+          var xo2=Math.round(Math.sin(t2*2+i)*7);
+          rp(c,sx2+xo2-ww,y,ww*2,2,T[0]);
+          rp(c,sx2+xo2-ww+1,y,Math.max(1,ww),2,T[2]);
+        }
+      }
+      for(i=0;i<200;i++) px(c,Math.round(rnd()*W),Math.round(SURFACE+rnd()*(FLOOR-SURFACE)),T[2]);
     }
   });
 }
 function bakeFloor(){
+  var B0=biome(), T=B0.floor;
   var rnd=mulberry32(0xF1007), wv=makeWaves(rnd,4);
-  var T=['#2a3f4a','#3e606d','#57808b','#78a0a8'];
   SPR.floorL = makeSprite(W,H-FLOOR+8,function(c,w,h){
-    for(var y=0;y<h;y+=2){
-      for(var x=0;x<W;x+=2){
+    var i,y,x;
+    for(y=0;y<h;y+=2){
+      for(x=0;x<W;x+=2){
         var n=noise(wv,x,y)*0.7+(rnd()-0.5)*0.14 - (y/h)*0.5;
         rp(c,x,y,Math.min(2,W-x),Math.min(2,h-y),T[step(n,T.length)]);
       }
     }
-    // pebbles / debris ~150 per screen (PIXEL_ART_SPEC §5)
-    for(var i=0;i<170;i++){
-      var r=2+Math.round(rnd()*3);
-      var px2=Math.round(r+1+rnd()*(W-2*r-2)), py=Math.round(r+1+rnd()*(h-2*r-2));
-      circ(c,px2,py,r+1,T[0]); circ(c,px2,py,r,T[2]); px(c,px2-1,py-1,T[3]);
+    if(B0.id==='pond'){                        /* pebbles */
+      for(i=0;i<170;i++){
+        var r=2+Math.round(rnd()*3);
+        var px2=Math.round(r+1+rnd()*(W-2*r-2)), py=Math.round(r+1+rnd()*(h-2*r-2));
+        circ(c,px2,py,r+1,T[0]); circ(c,px2,py,r,T[2]); px(c,px2-1,py-1,T[3]);
+      }
+    } else if(B0.id==='reef'){                 /* sand ripples and rubble */
+      for(y=0;y<h;y+=4){
+        for(x=0;x<W;x+=2){
+          var rip=Math.sin(x*0.06+y*0.3);
+          if(rip>0.4) rp(c,x,y+Math.round(Math.sin(x*0.03)*2),2,2,T[3]);
+          else if(rip<-0.6) rp(c,x,y,2,1,T[1]);
+        }
+      }
+      for(i=0;i<80;i++){
+        var bx=Math.round(4+rnd()*(W-8)), by2=Math.round(4+rnd()*(h-8));
+        rp(c,bx,by2,3+Math.round(rnd()*4),2,T[0]); rp(c,bx,by2,2,1,T[3]);
+      }
+    } else if(B0.id==='kelp'){                 /* knobby rock and holdfasts */
+      for(i=0;i<60;i++){
+        var hx=Math.round(8+rnd()*(W-16)), hy=Math.round(6+rnd()*(h-12));
+        for(var f2=0;f2<5;f2++){
+          var an=f2*1.25;
+          rp(c,hx+Math.round(Math.cos(an)*6),hy+Math.round(Math.sin(an)*3),3,3,T[0]);
+        }
+        circ(c,hx,hy,3,T[1]); px(c,hx-1,hy-1,T[3]);
+      }
+    } else {                                   /* trench: silt, cracks, a cold glimmer */
+      for(i=0;i<26;i++){
+        var cx2=Math.round(rnd()*W), cy2=Math.round(rnd()*h), ln=14+Math.round(rnd()*50);
+        for(var q2=0;q2<ln;q2++){
+          var qx=cx2+Math.round(Math.cos(i)*q2), qy=cy2+Math.round(Math.sin(i*2)*q2*0.3);
+          if(qx<0||qx>=W||qy<0||qy>=h) break;
+          px(c,qx,qy,T[0]);
+          if(q2%5===0) px(c,qx,qy-1,'#2b5f7a');
+        }
+      }
+      for(i=0;i<40;i++) px(c,Math.round(rnd()*W),Math.round(rnd()*h),T[3]);
     }
   });
 }
 function bakeKelp(){
+  var B0=biome();
+  SPR.plantsMid=[];
   for(var k=0;k<4;k++){
     (function(k){
-      var rnd=mulberry32(0x4E19+k), hgt=200+Math.round(rnd()*180);
-      SPR.plantsMid.push(makeSprite(72,hgt,function(c,w,h){
-        var G=['#0c2a1c','#1a5033','#2f7d47','#57ab5c'];
-        var cx=36;
-        for(var y=h-1;y>=0;y--){
-          var t=1-y/h;
-          var xoff=Math.round(Math.sin(t*3+k)*13);
-          var wd=Math.max(3,Math.round(11-t*5));
-          rp(c,cx+xoff-wd-1,y,wd*2+2,1,G[0]);
-          rp(c,cx+xoff-wd,y,wd*2,1,G[1]);
-          rp(c,cx+xoff-wd+1,y,Math.max(1,wd),1,G[2]);
-          if(y%7===0) rp(c,cx+xoff-wd+1,y,1,1,G[3]);
-        }
-      }));
+      var rnd=mulberry32(0x4E19+k);
+      if(B0.id==='reef'){                      /* fan corals, not weeds */
+        var hgt=110+Math.round(rnd()*90);
+        SPR.plantsMid.push(makeSprite(90,hgt,function(c,w,h){
+          var G2=['#3a1030','#6e2050','#a83a78','#e07ab0'];
+          for(var i=0;i<9;i++){
+            var an=-1.4+i*0.35, ln=h*(0.5+rnd()*0.45);
+            for(var q=0;q<ln;q++){
+              var x=45+Math.round(Math.sin(an)*q*0.8), y=h-1-Math.round(Math.cos(an)*q);
+              if(x<1||x>w-2||y<0) break;
+              rp(c,x-1,y,3,1,G2[0]); px(c,x,y,G2[2]);
+              if(q%7===0) px(c,x,y,G2[3]);
+            }
+          }
+        }));
+      } else if(B0.id==='trench'){             /* dead spires, nothing grows */
+        var hgt2=90+Math.round(rnd()*120);
+        SPR.plantsMid.push(makeSprite(46,hgt2,function(c,w,h){
+          var G3=['#0a0f16','#141c28','#22303e','#3c5468'];
+          for(var y=h-1;y>=0;y--){
+            var t=1-y/h, ww=Math.max(1,Math.round(9-t*8));
+            var xo=Math.round(Math.sin(t*2)*5);
+            rp(c,23+xo-ww,y,ww*2,1,G3[0]);
+            rp(c,23+xo-ww+1,y,Math.max(1,ww),1,G3[2]);
+            if(y%17===0) px(c,23+xo,y,G3[3]);
+          }
+        }));
+      } else {                                 /* pond and kelp: strands */
+        var hgt3=(B0.id==='kelp'?280:200)+Math.round(rnd()*180);
+        SPR.plantsMid.push(makeSprite(72,hgt3,function(c,w,h){
+          var G4 = B0.id==='kelp' ? ['#0a2416','#164a2c','#28753e','#4aa254']
+                                  : ['#0c2a1c','#1a5033','#2f7d47','#57ab5c'];
+          for(var y=h-1;y>=0;y--){
+            var t=1-y/h;
+            var xoff=Math.round(Math.sin(t*3+k)*13);
+            var wd=Math.max(3,Math.round(11-t*5));
+            rp(c,36+xoff-wd-1,y,wd*2+2,1,G4[0]);
+            rp(c,36+xoff-wd,y,wd*2,1,G4[1]);
+            rp(c,36+xoff-wd+1,y,Math.max(1,wd),1,G4[2]);
+            if(y%7===0) rp(c,36+xoff-wd+1,y,1,1,G4[3]);
+            if(B0.id==='kelp' && y%22===0){ rp(c,36+xoff-wd-8,y,8,2,G4[1]); rp(c,36+xoff+wd,y,8,2,G4[1]); }
+          }
+        }));
+      }
     })(k);
   }
 }
 function bakeRays(){
+  var B0=biome();
   SPR.rays = makeSprite(W,H,function(c){
+    if(!B0.rays) return;                       /* the trench has no sun at all */
     var rnd=mulberry32(0x2A45);
-    for(var i=0;i<7;i++){
-      var x=Math.round(rnd()*W), wd=14+Math.round(rnd()*26);
+    var beams = B0.id==='kelp' ? 12 : 7;
+    for(var i=0;i<beams;i++){
+      var x=Math.round(rnd()*W), wd=(B0.id==='kelp'?5:14)+Math.round(rnd()*(B0.id==='kelp'?10:26));
       for(var y=SURFACE;y<FLOOR;y+=2){
         var t=(y-SURFACE)/(FLOOR-SURFACE);
-        var a=(1-t)*0.055;
+        var a=(1-t)*B0.rays;
         var xx=Math.max(0,Math.round(x+t*80));
         if(xx>=W) continue;
         var ww=Math.max(1,Math.min(Math.round(wd*(1+t*0.6)),W-xx));
@@ -1024,15 +1514,18 @@ function bakeRays(){
   });
 }
 function bakeCaustic(){
+  var B0=biome();
+  SPR.caustic=[];
   var rnd=mulberry32(0xCA05), wv=makeWaves(rnd,3);
   for(var f=0;f<6;f++){
     (function(f){
       SPR.caustic.push(makeSprite(W,80,function(c,w,h){
+        if(!B0.caustic) return;
         for(var y=0;y<h;y+=2){
           for(var x=0;x<W;x+=2){
             var n=noise(wv,x+f*22,y*3);
             if(n>0.42){
-              var a=((n-0.42)*1.6*(1-y/h)).toFixed(3);
+              var a=((n-0.42)*1.6*(1-y/h)*B0.caustic).toFixed(3);
               c.fillStyle='rgba(180,255,240,'+a+')';
               c.fillRect(x,y,Math.min(2,W-x),2);
             }
@@ -1043,45 +1536,70 @@ function bakeCaustic(){
   }
 }
 function bakeFront(){
-  var rnd=mulberry32(0xF2007), wv=makeWaves(rnd,2);
+  var B0=biome();
+  var rnd=mulberry32(0xF2007);
   SPR.front = makeSprite(W,H,function(c){
-    for(var i=0;i<5;i++){
-      var bx=Math.round(rnd()*W), bh=200+Math.round(rnd()*220);
-      for(var y=H-2;y>H-bh;y-=2){
-        var t=(H-y)/bh, wd=Math.max(5,Math.round(26-t*18));
-        var xo=Math.round(Math.sin(t*4+i)*12);
-        var lx=Math.max(0,bx+xo-wd), rw=Math.min(wd*2,W-lx);
-        if(rw>0) rp(c,lx,y,rw,2,'#08303c');
+    var i,y;
+    if(B0.id==='reef'){                        /* fan corals in the foreground */
+      for(i=0;i<4;i++){
+        var fx=Math.round(rnd()*W), fh=180+Math.round(rnd()*180);
+        for(var an=-1.3;an<1.3;an+=0.12){
+          for(var q=0;q<fh;q+=2){
+            var x=fx+Math.round(Math.sin(an)*q*0.8), y2=H-Math.round(Math.cos(an)*q);
+            if(x<0||x>=W||y2<0) break;
+            rp(c,x,y2,3,2,B0.front);
+          }
+        }
+      }
+    } else if(B0.id==='trench'){               /* jagged rock teeth */
+      for(i=0;i<7;i++){
+        var tx=Math.round(rnd()*W), th=160+Math.round(rnd()*240), tw=26+Math.round(rnd()*40);
+        for(y=H-2;y>H-th;y-=2){
+          var t=(H-y)/th, ww=Math.max(3,Math.round(tw*(1-t)));
+          var lx=Math.max(0,tx-ww), rw2=Math.min(ww*2,W-lx);
+          if(rw2>0) rp(c,lx,y,rw2,2,B0.front);
+        }
+      }
+    } else {                                   /* stems and blades */
+      for(i=0;i<5;i++){
+        var bx=Math.round(rnd()*W), bh=200+Math.round(rnd()*220);
+        for(y=H-2;y>H-bh;y-=2){
+          var t3=(H-y)/bh, wd=Math.max(5,Math.round((B0.id==='kelp'?34:26)-t3*18));
+          var xo=Math.round(Math.sin(t3*4+i)*12);
+          var lx2=Math.max(0,bx+xo-wd), rw3=Math.min(wd*2,W-lx2);
+          if(rw3>0) rp(c,lx2,y,rw3,2,B0.front);
+        }
       }
     }
-    noise(wv,0,0);
   });
 }
-function bakeGlass(){
-  SPR.glass = makeSprite(W,H,function(c){
-    var F='#0a1a22', F2='#20505e';
-    rp(c,0,0,W,SURFACE-8,'#061018');
-    rp(c,0,SURFACE-9,W,2,F2);
-    rp(c,0,0,8,H,F); rp(c,W-8,0,8,H,F);
-    rp(c,8,0,2,H,F2); rp(c,W-10,0,2,H,F2);
-    rp(c,0,H-8,W,8,F); rp(c,0,H-10,W,2,F2);
-    // vignette
-    for(var i=0;i<70;i++){
-      var a=(i/70)*0.5;
-      c.fillStyle='rgba(2,10,16,'+(0.014).toFixed(3)+')';
-      c.fillRect(i,i,W-i*2,1); c.fillRect(i,H-1-i,W-i*2,1);
-      c.fillRect(i,i,1,H-i*2); c.fillRect(W-1-i,i,1,H-i*2);
-      if(a<0){}
+function bakeScene(){
+  bakeBackground(); bakeFar(); bakeMid(); bakeFloor();
+  bakeKelp(); bakeRays(); bakeCaustic(); bakeFront();
+}
+/* "ready to merge" is drawn as a GLYPH above the head - two interlocked rings.
+   Deliberately not another coloured aura: that is exactly the confusion we already
+   fixed once between mutant halos and merge hints. */
+function bakeReady(){
+  SPR.ready = makeSprite(20,12,function(c){
+    function link(cx){
+      circ(c,cx,6,5,'#06202a');
+      circ(c,cx,6,4,'#eafffb');
+      circ(c,cx,6,2,'#06202a');
     }
-    // glass highlight streaks
-    for(var k=0;k<3;k++){
-      var x=60+k*300;
-      for(var y=SURFACE;y<H-20;y++){
-        c.fillStyle='rgba(200,255,255,0.025)';
-        c.fillRect(x+Math.round(y*0.12),y,6,1);
-      }
-    }
+    link(6); link(13);
+    circ(c,9,6,2,'#eafffb');
+    px(c,4,3,'#ffffff'); px(c,11,3,'#ffffff');
   });
+}
+function bakeRings(){
+  var kinds=['ok','unstable','chimera'];
+  for(var k=0;k<kinds.length;k++){
+    SPR.ring[kinds[k]]=[];
+    for(var r=0;r<3;r++){
+      SPR.ring[kinds[k]].push(makeRing(Math.round(RANK_LEN[r]*0.78),3,SIGNAL[kinds[k]],10));
+    }
+  }
 }
 function drawDecor(c,id,w,h,seed){
   var P=DPAL[id], rnd=mulberry32(seed), i, base=h-1, cx=w>>1;
@@ -1116,7 +1634,7 @@ function drawDecor(c,id,w,h,seed){
     dome(c,cx-2,base,Math.round(w*0.38),h-9,P[2]);
     dome(c,cx-4,base,Math.round(w*0.26),h-16,P[3]);
     dome(c,cx,base,Math.round(w*0.20),Math.round(h*0.62),P[0]);
-    dome(c,cx,base,Math.round(w*0.17),Math.round(h*0.58),'#05161d');   // the mouth of the cave
+    dome(c,cx,base,Math.round(w*0.17),Math.round(h*0.58),'#05161d');
     for(i=0;i<26;i++) px(c,Math.round(2+rnd()*(w-4)),Math.round(base-rnd()*(h-6)), rnd()<0.5?P[1]:P[4]);
   } else if(id==='crystal'){
     for(i=0;i<4;i++){
@@ -1139,7 +1657,7 @@ function drawDecor(c,id,w,h,seed){
     ell(c,cx,base-24,11,16,P[0]); ell(c,cx,base-24,10,15,P[1]);
     ell(c,cx-1,base-26,8,12,P[2]); ell(c,cx-2,base-28,5,8,P[3]);
     ell(c,cx,base-48,9,11,P[0]); ell(c,cx,base-48,8,10,P[1]); ell(c,cx-1,base-50,6,7,P[2]);
-    circ(c,cx,base-50,3,P[0]); circ(c,cx,base-50,2,P[4]);   // an eye that should not be there
+    circ(c,cx,base-50,3,P[0]); circ(c,cx,base-50,2,P[4]);
     for(i=0;i<20;i++) px(c,Math.round(cx-12+rnd()*24),Math.round(base-8-rnd()*48), rnd()<0.5?P[0]:P[3]);
   }
 }
@@ -1153,20 +1671,32 @@ function bakeDecor(){
     }
   }
 }
-function bakeRings(){
-  var kinds=['ok','unstable','chimera'];
-  for(var k=0;k<kinds.length;k++){
-    SPR.ring[kinds[k]]=[];
-    for(var r=0;r<3;r++){
-      SPR.ring[kinds[k]].push(makeRing(Math.round(RANK_LEN[r]*0.78),3,SIGNAL[kinds[k]],10));
+function bakeGlass(){
+  SPR.glass = makeSprite(W,H,function(c){
+    var F='#0a1a22', F2='#20505e';
+    rp(c,0,0,W,SURFACE-8,'#061018');
+    rp(c,0,SURFACE-9,W,2,F2);
+    rp(c,0,0,8,H,F); rp(c,W-8,0,8,H,F);
+    rp(c,8,0,2,H,F2); rp(c,W-10,0,2,H,F2);
+    rp(c,0,H-8,W,8,F); rp(c,0,H-10,W,2,F2);
+    for(var i=0;i<70;i++){
+      c.fillStyle='rgba(2,10,16,0.014)';
+      c.fillRect(i,i,W-i*2,1); c.fillRect(i,H-1-i,W-i*2,1);
+      c.fillRect(i,i,1,H-i*2); c.fillRect(W-1-i,i,1,H-i*2);
     }
-  }
+    for(var k=0;k<3;k++){
+      var x=60+k*300;
+      for(var y=SURFACE;y<H-20;y++){
+        c.fillStyle='rgba(200,255,255,0.025)';
+        c.fillRect(x+Math.round(y*0.12),y,6,1);
+      }
+    }
+  });
 }
+
 function bakeAll(){
-  bakeFood(); bakeRings(); bakeDecor(); bakeBackground();
-  SPR.far = bakeLayer(0xFA71,300,['#0e4a5a','#125868'],40,'far');
-  SPR.mid = bakeLayer(0x31D2,392,['#0c3e4c','#105260','#156270'],28,'mid');
-  bakeFloor(); bakeKelp(); bakeRays(); bakeCaustic(); bakeFront(); bakeGlass();
+  bakeFood(); bakeRings(); bakeReady(); bakeDecor();
+  bakeScene(); bakeGlass();
 }
 
 /* ============================================================
@@ -1178,9 +1708,13 @@ var G = {
   discovered:{},         // id -> true
   unlocked:{},           // base species earned through achievements
   achs:{},               // achievement id -> true
-  stats:{merges:0,mutants:0,chimeras:0,released:0},
+  stats:{merges:0,mutants:0,chimeras:0,released:0,fed:0},
+  tips:{}, tip:null, tipGap:0,
+  sess:null,             // snapshot taken when the session starts
+  away:null,             // what happened while the tank ran without you
   fish:[], pellets:[], parts:[], bubbles:[], decor:[], quests:[],
   env:{LUMEN:0,ABYSS:0,ARMOR:0,FLOW:0,BLOOM:0,CHIMERA:0},
+  biome:'pond', biomesOwned:{pond:true},
   oxyCap:150, oxyUse:0, stagnant:false,
   speed:1, spawnTimer:0,
   feedOpen:false, foodIdx:0,
@@ -1198,10 +1732,12 @@ var G = {
 function save(){
   try{
     var d={ v:3, name:G.name, pearls:G.pearls, discovered:G.discovered, spawnTimer:G.spawnTimer,
-      unlocked:G.unlocked, achs:G.achs, stats:G.stats,
+      unlocked:G.unlocked, achs:G.achs, stats:G.stats, muted:AU.muted?1:0, tips:G.tips,
+      savedAt:Date.now(),
+      biome:G.biome, biomesOwned:G.biomesOwned,
       decor:G.decor.map(function(x){ return {id:x.id,x:x.x,v:x.v}; }),
       quests:G.quests.map(function(q){ return {id:q.id,prog:q.prog}; }),
-      fish:G.fish.map(function(f){ return {s:f.sp,r:f.rank,a:f.age,x:f.x,y:f.y,d:f.diet}; }) };
+      fish:G.fish.map(function(f){ return {s:f.sp,r:f.rank,a:f.age,x:f.x,y:f.y,d:f.diet,rp:f.ripe}; }) };
     localStorage.setItem(SAVE_KEY,JSON.stringify(d));
   }catch(e){}
 }
@@ -1230,10 +1766,21 @@ function load(){
   if(d.achs && typeof d.achs==='object'){
     for(var k3 in d.achs){ for(var ai=0;ai<ACHS.length;ai++) if(ACHS[ai].id===k3) G.achs[k3]=true; }
   }
-  G.stats = {merges:0,mutants:0,chimeras:0,released:0};
+  AU.muted = !!d.muted;
+  G.tips = {};
+  if(d.tips && typeof d.tips==='object'){
+    for(var k5 in d.tips) if(tipDef(k5)) G.tips[k5]=true;
+  }
+  G.tip=null; G.tipGap=0;
+  G.stats = {merges:0,mutants:0,chimeras:0,released:0,fed:0};
   if(d.stats && typeof d.stats==='object'){
     for(var k4 in G.stats) G.stats[k4]=num(d.stats[k4],0,0,999999);
   }
+  G.biomesOwned={pond:true};
+  if(d.biomesOwned && typeof d.biomesOwned==='object'){
+    for(var b0 in d.biomesOwned) if(biomeDef(b0).id===b0) G.biomesOwned[b0]=true;
+  }
+  G.biome = (typeof d.biome==='string' && biomeDef(d.biome).id===d.biome && G.biomesOwned[d.biome]) ? d.biome : 'pond';
   G.decor=[];
   if(Array.isArray(d.decor)){
     for(var q0=0;q0<d.decor.length && G.decor.length<DECOR_MAX;q0++){
@@ -1252,6 +1799,7 @@ function load(){
   }
   fillQuests();
   recalcEnv();
+  G._savedAt = num(d.savedAt,0,0,1e15);
   G.fish=[];
   if(Array.isArray(d.fish)){
     for(var i=0;i<d.fish.length && i<80;i++){
@@ -1259,6 +1807,8 @@ function load(){
       if(!f||!SPECIES[f.s]) continue;                    // unknown skin -> drop
       var nf=makeFish(f.s, num(f.r,0,0,2)|0, num(f.x,W/2,20,W-20), num(f.y,240,SURFACE+10,FLOOR-10));
       nf.age = num(f.a,0,0,1);
+      nf.ripe = num(f.rp,RIPEN,0,RIPEN);
+      nf.ready = (nf.age>=1 && nf.ripe<=0);
       if(f.d) for(var a=0;a<AXES.length;a++) nf.diet[AXES[a]] = num(f.d[AXES[a]],0,0,100);
       G.fish.push(nf);
     }
@@ -1286,12 +1836,17 @@ function makeFish(spId,rank,x,y){
     roam: 80+gameRnd()*110,
     retarget: gameRnd()*4,
     pace: 0.8+gameRnd()*0.5,
-    _flip:false
+    _flip:false,
+    ripe: RIPEN,        // counts down once the fish is an adult
+    ready:false, mate:null
   };
 }
 function discover(id){
   if(G.discovered[id]) return false;
-  G.discovered[id]=true; addPearls(100);
+  G.discovered[id]=true; addPearls(120);
+  if(G.sess && G.sess.found.length<8) G.sess.found.push(id);
+  sfx('discover');
+  recalcEnv();                 // a wider codex needs a roomier tank
   questEvent('discover',1);
   return true;
 }
@@ -1302,7 +1857,12 @@ function speciesCount(){ var n=0; for(var k in G.discovered) if(G.discovered[k])
 function recalcEnv(){
   var i, a;
   for(a=0;a<AXES.length;a++) G.env[AXES[a]]=0;
-  var cap=150;
+  /* Merging needs a PAIR of the same species and rank. Every species you discover
+     adds three more buckets to sort fish into, so pairs get rarer as you get better.
+     Capacity has to grow with the codex or a good player gets punished with a stall. */
+  var cap=150 + Math.max(0, speciesCount()-4)*9;
+  var B0=biome();
+  for(a in B0.axes) G.env[a]=(G.env[a]||0)+B0.axes[a];   // the biome itself leans
   for(i=0;i<G.decor.length;i++){
     var d=decorDef(G.decor[i].id);
     if(!d) continue;
@@ -1355,7 +1915,7 @@ function tryMerge(a,b){
       /* 90%: the cross collapses and takes both parents with it */
       addPearls(15);
       burst(x,y,44,'#7fa8b8');
-      questEvent('merge',1); questEvent('cross',1); bumpStat('merges',1);
+      questEvent('merge',1); questEvent('cross',1); bumpStat('merges',1); sfx('fail');
       G.event={ title:'CROSS FAILED', sub:'BOTH DISSOLVED', id:null, t:EVENT_T, new:false, fail:true };
       G.timeScale=0.15;
       recalcOxygen(); save();
@@ -1363,7 +1923,7 @@ function tryMerge(a,b){
     }
   } else if(kind==='rank'){
     res=makeFish(spA,a.rank+1,x,y); res.diet=diet; res.age=1;
-    coins = a.rank===0 ? 8 : 20;
+    coins = a.rank===0 ? 10 : 25;
   } else if(kind==='evolve'){
     var axis=null, best=-1;
     for(var k=0;k<sp.axes.length;k++){
@@ -1377,7 +1937,7 @@ function tryMerge(a,b){
       toast('THIS LINE ENDS HERE - FOR NOW');
     } else {
       res=makeFish(tgt,0,x,y); res.age=1;
-      coins=50; isNew=discover(tgt);
+      coins=60; isNew=discover(tgt);
       title=isNew?'NEW SPECIES':'EVOLVED'; sub=SPECIES[tgt].name;
     }
   } else { /* unstable: mismatched ranks */
@@ -1390,12 +1950,14 @@ function tryMerge(a,b){
       coins=8; toast('UNSTABLE CROSS - FELL BACK');
     }
   }
+  if(res){ res.ripe=RIPEN; res.ready=false; res.mate=null; }
   addPearls(coins);
+  sfx(kind==='evolve' && title ? 'evolve' : 'merge');
   bumpStat('merges',1);
   questEvent('merge',1);
   if(kind==='evolve' && title) questEvent('evolve',1);
-  if(title==='MUTANT!'){ questEvent('mutant',1); bumpStat('mutants',1); }
-  if(title==='CHIMERA!'){ questEvent('cross',1); bumpStat('chimeras',1); }
+  if(title==='MUTANT!'){ questEvent('mutant',1); bumpStat('mutants',1); sfx('mutant'); }
+  if(title==='CHIMERA!'){ questEvent('cross',1); bumpStat('chimeras',1); sfx('chimera'); }
   if(res.rank===2) questEvent('l3',1);
   G.fish.push(res);
   burst(x,y,title?30:12,title?'#b8f6ff':'#8fd8c8');
@@ -1412,6 +1974,7 @@ function releaseFish(f){
   removeFish(f);
   burst(f.x,f.y,18,'#bff0ff');
   for(var i=0;i<10;i++) G.bubbles.push({x:f.x+(gameRnd()-0.5)*20,y:f.y,r:1+Math.round(gameRnd()*2),v:40+gameRnd()*30,w:gameRnd()*6.28});
+  sfx('release');
   G.stats.released=(G.stats.released||0)+1;
   recalcOxygen(); save();
   toast('RELEASED - IT STAYS IN YOUR CODEX FOREVER');
@@ -1439,6 +2002,7 @@ function checkAchs(){
     G.event={ title:'UNLOCKED', sub:sp?sp.name:a.gives, id:a.gives, t:EVENT_T, new:true, ach:true };
     G.timeScale=0.15;
     addPearls(150);
+    sfx('ach');
     save();
   }
 }
@@ -1451,6 +2015,7 @@ function questEvent(ev,n){
     q.prog+=n;
     if(q.prog>=d.goal){
       addPearls(d.reward);
+      sfx('quest');
       toast('QUEST DONE: +'+d.reward+' PEARLS');
       var done=q.id;
       G.quests.splice(i,1); i--;
@@ -1469,6 +2034,21 @@ function burst(x,y,n,col){
    SIMULATION
    ============================================================ */
 function tankFull(){ return G.oxyUse+RANK_O2[0] > G.oxyCap; }
+function setBiome(id){
+  var d=biomeDef(id);
+  if(!G.biomesOwned[id]){
+    if(G.pearls<d.cost){ toast('NOT ENOUGH PEARLS'); sfx('nope'); return false; }
+    addPearls(-d.cost); G.biomesOwned[id]=true;
+  }
+  G.biome=id;
+  bakeScene();                       // every layer is regenerated, not recoloured
+  AU.bpm=d.bpm; SC=d.scale; AU.step=0;
+  recalcEnv(); recalcOxygen();
+  sfx('decor');
+  toast(d.name+'  -  '+d.desc);
+  save();
+  return true;
+}
 function decorAt(x){
   for(var i=G.decor.length-1;i>=0;i--){
     var d=decorDef(G.decor[i].id);
@@ -1481,12 +2061,13 @@ function placeDecor(x){
   var d=DECOR[G.buildIdx];
   if(!d) return;
   if(G.decor.length>=DECOR_MAX){ toast('NO ROOM LEFT ON THE FLOOR'); return; }
-  if(G.pearls<d.cost){ toast('NOT ENOUGH PEARLS'); return; }
+  if(G.pearls<d.cost){ toast('NOT ENOUGH PEARLS'); sfx('nope'); return; }
   x=Math.max(40,Math.min(W-40,x));
   if(decorAt(x)>=0){ toast('SOMETHING IS ALREADY THERE'); return; }
   addPearls(-d.cost);
   G.decor.push({ id:d.id, x:Math.round(x), v:Math.floor(gameRnd()*2) });
   recalcEnv(); recalcOxygen(); questEvent('decor',1);
+  sfx('decor');
   burst(x,FLOOR-10,14,'#9ee08a');
   toast(d.name+' PLANTED  (+'+d.axis+(d.o2?'  +'+d.o2+' O2':'')+')');
   save();
@@ -1511,16 +2092,20 @@ function spawnFry(){
 function dropFood(x,y){
   var f=FOODS[G.foodIdx];
   if(f.cost>0){
-    if(G.pearls<f.cost){ toast('NOT ENOUGH PEARLS'); return; }
+    if(G.pearls<f.cost){ toast('NOT ENOUGH PEARLS'); sfx('nope'); return; }
     addPearls(-f.cost);
   }
   for(var i=0;i<4;i++){
     G.pellets.push({x:x+(gameRnd()-0.5)*26,y:y+(gameRnd()-0.5)*14,vy:14+gameRnd()*10,food:f.id,axis:f.axis,taken:false});
   }
   if(f.axis) questEvent('special',1);
+  G.stats.fed=(G.stats.fed||0)+1;
+  sfx('feed');
 }
 function update(dt){
   G.t+=dt; G.frames++;
+  musicTick();
+  tipTick(dt);
   var i,f;
 
   if(G.event){
@@ -1538,6 +2123,7 @@ function update(dt){
   }
 
   /* fish */
+  var pending=[];
   for(i=0;i<G.fish.length;i++){
     f=G.fish[i];
     var sp=SPECIES[f.sp];
@@ -1560,9 +2146,11 @@ function update(dt){
         target.taken=true;
         f.hunger=Math.max(0,f.hunger-0.34);
         f.age=Math.min(1,f.age+(0.10+(target.axis?0.06:0))*(G.stagnant?0.5:1));
-        if(target.axis) f.diet[target.axis]=Math.min(100,f.diet[target.axis]+1);
+        if(target.axis) f.diet[target.axis]=Math.min(100,f.diet[target.axis]+2.5);
         burst(target.x,target.y,3,'#cfe9d8');
       }
+    } else if(f.ready && f.mate){
+      f.tx=f.mate.x; f.ty=f.mate.y;       // courtship beats wandering
     } else {
       f.retarget-=dt;
       f.homeX += (gameRnd()-0.5)*14*dt;   // the patch itself drifts, slowly
@@ -1586,11 +2174,30 @@ function update(dt){
     var dx=f.tx-f.x, dy=f.ty-f.y, dl=Math.hypot(dx,dy)||1;
     f.vx += (dx/dl*spd - f.vx)*Math.min(1,dt*1.6);
     f.vy += (dy/dl*spd*0.7 - f.vy)*Math.min(1,dt*1.6);
+    /* who is my kind, ripe, and closest? Home ranges mean they would never
+       bump into each other by chance, so ripe fish go looking. */
+    f.mate=null;
+    if(f.ready && !f.held && !G.event){
+      var mb=1e9;
+      for(var m2=0;m2<G.fish.length;m2++){
+        var cand=G.fish[m2];
+        if(cand===f || !cand.ready || cand.held) continue;
+        var mk=mergeKind(f,cand);
+        /* AUTO only climbs the ladder. Two ripe MUTANTS are also "same kind and
+           rank" - but that pairing is the 10%/90% gamble, and the game must never
+           gamble the player's mutants away on its own. */
+        if(mk!=='rank' && mk!=='evolve') continue;
+        var md=Math.hypot(cand.x-f.x,cand.y-f.y);
+        if(md<mb){ mb=md; f.mate=cand; }
+      }
+      if(f.mate && mb < (RANK_LEN[f.rank]+RANK_LEN[f.mate.rank])*0.24) pending.push([f,f.mate]);
+    }
+
     /* separation */
     var sx=0, sy=0;
     for(var s2=0;s2<G.fish.length;s2++){
       var o=G.fish[s2];
-      if(o===f) continue;
+      if(o===f || o===f.mate) continue;   // a courting pair must be allowed to touch
       var ox=f.x-o.x, oy=f.y-o.y, od=Math.hypot(ox,oy);
       var need=(RANK_LEN[f.rank]+RANK_LEN[o.rank])*0.40;
       if(od<need && od>0.001){ sx+=ox/od*(need-od); sy+=oy/od*(need-od); }
@@ -1608,14 +2215,22 @@ function update(dt){
     if(Math.abs(f.vx)>3) f.dir = f.vx<0?-1:1;
     f.frame = (f.frame + dt*(4+Math.min(6,Math.abs(f.vx)*0.12))) % FRAMES;
 
-    /* the tank itself leans on every fish: slow, but it never stops */
+    /* The tank leans on every fish - and old leanings fade.
+       Without the decay every axis creeps to 100, argmax becomes a coin toss and the
+       player's whole lever dies: you could never re-steer a fish either. */
     for(var ea=0;ea<AXES.length;ea++){
       var eax=AXES[ea];
-      if(G.env[eax]>0) f.diet[eax]=Math.min(100,f.diet[eax]+G.env[eax]*dt*0.06);
+      f.diet[eax] *= (1 - dt*0.004);                 // half-life about three minutes
+      if(G.env[eax]>0) f.diet[eax]=Math.min(100,f.diet[eax]+G.env[eax]*dt*0.10);
     }
     if(!f._ax40){
       for(var eb=0;eb<AXES.length;eb++) if(f.diet[AXES[eb]]>=40){ f._ax40=true; questEvent('axis40',1); break; }
     }
+
+    /* an adult ripens for a minute, then looks for its own kind (RIPEN) */
+    if(f.age>=1){
+      if(f.ripe>0){ f.ripe-=dt; if(f.ripe<=0){ f.ripe=0; f.ready=true; } }
+    } else { f.ripe=RIPEN; f.ready=false; }
 
     /* grow with time when fed */
     if(f.hunger<0.6) f.age=Math.min(1,f.age+dt*0.02*(G.stagnant?0.5:1));
@@ -1626,13 +2241,20 @@ function update(dt){
       f.breed-=dt*(sp.base?1:0.4);
       if(f.breed<=0){
         f.breed=20+gameRnd()*20;
-        if(G.oxyUse+RANK_O2[0] <= G.oxyCap && G.fish.length<28){
+        if(G.oxyUse+RANK_O2[0] <= G.oxyCap && G.fish.length<44){
           var kid=makeFish(f.sp,0,f.x+(gameRnd()-0.5)*30,f.y+10);
           G.fish.push(kid); recalcOxygen();
           burst(kid.x,kid.y,6,'#bff0ff');
         }
       }
     }
+  }
+
+  /* couples that touched this frame - merged after the loop, never during it */
+  for(i=0;i<pending.length;i++){
+    var pa=pending[i][0], pb=pending[i][1];
+    if(G.fish.indexOf(pa)<0 || G.fish.indexOf(pb)<0) continue;
+    tryMerge(pa,pb);
   }
 
   /* particles */
@@ -1751,6 +2373,23 @@ function drawFish(c,f,alpha){
     c.drawImage(img,x,y,w,h);
   }
   c.globalAlpha=1;
+  /* ready glyph + the minute ticking away */
+  if(f.age>=1 && !f.held && alpha>0.9){
+    var topY=Math.round(f.y-RANK_LEN[f.rank]*0.42)-12;
+    if(f.ready && SPR.ready){
+      var rimg2=SPR.ready;
+      var bobY=Math.round(Math.sin(G.t*4+f.bob)*2);
+      c.globalAlpha=0.85+Math.sin(G.t*5+f.bob)*0.15;
+      c.drawImage(rimg2,Math.round(f.x-rimg2.width/2),topY+bobY);
+      c.globalAlpha=1;
+    } else if(f.ripe>0 && f.ripe<RIPEN){
+      var bw=Math.round(RANK_LEN[f.rank]*0.42);
+      var fw=Math.round((1-f.ripe/RIPEN)*bw);
+      rp(c,Math.round(f.x-bw/2)-1,topY+8,bw+2,3,'rgba(6,32,42,0.55)');
+      if(fw>0) rp(c,Math.round(f.x-bw/2),topY+9,fw,1,'rgba(190,240,250,0.75)');
+    }
+  }
+
   /* drag target hint: dashed ring in a reserved signal colour, never a soft halo.
      green = safe, orange = risky, red = you may lose both. */
   if(G.drag && G.drag!==f){
@@ -1801,8 +2440,17 @@ function drawUI(c){
   BTN.menu={x:12,y:8,w:180,h:26};
   text(c,'PEARLS '+G.pearls,300,14,10,'#ffd98a');
   text(c,'SPECIES '+speciesCount()+'/'+SPECIES_ORDER.length,470,14,10,'#b8f6ff');
+  /* mute */
+  var mx=W-30;
+  BTN.mute={x:mx-12,y:8,w:26,h:26};
+  rp(c,mx-8,16,3,6,AU.muted?'#5f8b95':'#7fe9d0');
+  tri(c,mx-1,19,6,5,0,AU.muted?'#5f8b95':'#7fe9d0',0);
+  if(AU.muted){ rp(c,mx+2,14,1,12,'#ff8fb0'); rp(c,mx+3,15,1,10,'#ff8fb0'); }
+  else { rp(c,mx+3,17,1,4,'#7fe9d0'); rp(c,mx+5,15,1,8,'#7fe9d0'); }
+  if(!AU.muted && !audioReady()) text(c,'TAP FOR SOUND',mx-24,15,7,'#ffd400','right');
+
   /* oxygen bar */
-  var ow=180, ox=W-ow-20;
+  var ow=180, ox=W-ow-56;
   rp(c,ox-1,13,ow+2,12,'#06202a');
   var frac=Math.min(1.4,G.oxyUse/G.oxyCap);
   var fw=Math.round(Math.min(1,frac)*ow);
@@ -1846,19 +2494,27 @@ function drawUI(c){
       text(c,f.cost?(''+f.cost):'FREE',248,yy+9,8, f.cost?'#ffd98a':'#8fd8c8','right');
     }
   }
-  /* build tray */
+  /* build tray: the tank itself on top, the things you put in it underneath */
   if(G.buildOpen){
-    var by2=H-58-DECOR.length*30-8;
-    panel(c,168,by2,300,DECOR.length*30+4,'#0a2a36');
-    for(var bi=0;bi<DECOR.length;bi++){
-      var d=DECOR[bi], yy2=by2+4+bi*30;
-      if(bi===G.buildIdx) rp(c,170,yy2,296,26,'#175f6d');
-      circ(c,184,yy2+13,4,'#101820'); circ(c,184,yy2+13,3,DPAL[d.id][3]);
-      text(c,d.name,198,yy2+9,8,'#eafffb');
-      text(c,'+'+d.axis.slice(0,4)+(d.o2?' +'+d.o2+'O2':''),330,yy2+9,6,'#8fd8c8');
-      text(c,''+d.cost,460,yy2+9,8, G.pearls>=d.cost?'#ffd98a':'#8a5a5a','right');
+    var by2=H-58-DECOR.length*30-52;
+    panel(c,120,by2,420,DECOR.length*30+50,'#0a2a36');
+    text(c,'TANK',130,by2+6,7,'#7fbfc8');
+    for(var vi=0;vi<BIOMES.length;vi++){
+      var bm=BIOMES[vi], bxx=126+vi*102, own=!!G.biomesOwned[bm.id], cur=(G.biome===bm.id);
+      panel(c,bxx,by2+18,98,24, cur?'#175f6d':(own?'#0e3a47':'#0b2b36'));
+      text(c,bm.name.split(' ')[bm.name.split(' ').length-1],bxx+49,by2+24,6, cur?'#eafffb':(own?'#9fe8dc':'#5f8b95'),'center');
+      if(!own) text(c,''+bm.cost,bxx+49,by2+34,5, G.pearls>=bm.cost?'#ffd98a':'#8a5a5a','center');
+      BTN['bio'+vi]={x:bxx,y:by2+18,w:98,h:24};
     }
-    text(c,'PICK ONE, THEN TAP THE FLOOR',318,by2-14,7,'#7fbfc8','center');
+    for(var bi=0;bi<DECOR.length;bi++){
+      var d=DECOR[bi], yy2=by2+48+bi*30;
+      if(bi===G.buildIdx) rp(c,122,yy2,416,26,'#175f6d');
+      circ(c,136,yy2+13,4,'#101820'); circ(c,136,yy2+13,3,DPAL[d.id][3]);
+      text(c,d.name,150,yy2+9,8,'#eafffb');
+      text(c,'+'+d.axis.slice(0,4)+(d.o2?' +'+d.o2+'O2':''),330,yy2+9,6,'#8fd8c8');
+      text(c,''+d.cost,532,yy2+9,8, G.pearls>=d.cost?'#ffd98a':'#8a5a5a','right');
+    }
+    text(c,'PICK ONE, THEN TAP THE FLOOR',330,by2-14,7,'#7fbfc8','center');
   }
   /* achievements: the only source of new base species */
   if(G.questsOpen){
@@ -1899,6 +2555,27 @@ function drawUI(c){
   for(ei=0;ei<AXES.length;ei++) if(G.env[AXES[ei]]>0) envTxt+=(envTxt?'  ':'')+AXES[ei]+' x'+G.env[AXES[ei]];
   if(envTxt) text(c,'TANK LEANS: '+envTxt,W/2,56,7,'rgba(160,230,240,0.65)','center');
 
+  /* the tip card */
+  if(G.tip){
+    var td=tipDef(G.tip.id);
+    if(td){
+      var tw=580, tx2=W/2-tw/2, ty3=H-124;
+      c.globalAlpha=0.5+Math.sin(G.t*4)*0.12;
+      rp(c,tx2-5,ty3-5,tw+10,52,'#1d6b7a'); c.globalAlpha=1;
+      panel(c,tx2,ty3,tw,42,'#0d3a48');
+      text(c,td.text,W/2,ty3+9,8,'#ffd400','center');
+      text(c,td.sub,W/2,ty3+24,6,'#bfe8f0','center');
+      text(c,'TAP TO CLOSE',W/2,ty3+32,5,'rgba(160,220,230,0.5)','center');
+      /* an arrow that points at the button it is talking about */
+      if(td.at && BTN[td.at]){
+        var b3=BTN[td.at], ax2=b3.x+b3.w/2;
+        for(var q3=0;q3<9;q3++) rp(c,ax2-(8-q3),ty3+44+q3,(8-q3)*2,1,'#ffd400');
+        c.globalAlpha=0.35+Math.sin(G.t*7)*0.2;
+        rp(c,b3.x-3,b3.y-3,b3.w+6,b3.h+6,'#ffd400'); c.globalAlpha=1;
+      }
+    }
+  }
+
   /* toast */
   if(G.toast){
     panel(c,W/2-170,H-108,340,26,'#0a2a36');
@@ -1930,6 +2607,55 @@ function drawEvent(c){
   text(c,e.sub||'',W/2,cy+108,10,'#eafffb','center');
   if(e.new) text(c, e.ach?'NOW APPEARS FROM NEW LIFE':'ADDED TO CODEX',W/2,cy+126,8,'#8fd8c8','center');
   if(e.fail) text(c,'+15 PEARLS FOR THE TROUBLE',W/2,cy+126,8,'#8fb8c8','center');
+}
+/* ---------- MEMORY ----------
+   The tank used to just run and run, and yesterday left no mark. */
+function sessionStart(){
+  G.sess = { species:speciesCount(), merges:G.stats.merges|0, pearls:G.pearls,
+             mutants:G.stats.mutants|0, chimeras:G.stats.chimeras|0,
+             fish:G.fish.length, t:Date.now(), found:[] };
+}
+function sessionEmpty(){
+  if(!G.sess) return true;
+  return (G.stats.merges|0)===G.sess.merges && speciesCount()===G.sess.species;
+}
+/* THE RULE: the tank grows and breeds while you are gone, but it NEVER merges.
+   A merge is the moment a new creature appears, and that has to happen in front
+   of the child - not in an empty room. You come back to a tank full of ripe fish. */
+var AWAY_CAP = 8*3600;
+function runAway(sec){
+  sec=Math.max(0,Math.min(AWAY_CAP,sec));
+  if(sec<120) return null;
+  var grown=0, hatched=0, i;
+  for(i=0;i<G.fish.length;i++){
+    var f=G.fish[i];
+    if(f.age<1){
+      var before=f.age;
+      f.age=Math.min(1, f.age + sec*0.006);      // slow: nobody was feeding them
+      if(before<1 && f.age>=1){ grown++; f.ripe=RIPEN; }
+    }
+    if(f.age>=1) f.ripe=Math.max(0, f.ripe - sec);
+    f.ready = (f.age>=1 && f.ripe<=0);
+    f.hunger=Math.min(1, f.hunger + sec*0.0004);  // and they are hungry when you return
+  }
+  var adults=G.fish.filter(function(x){ return x.age>=1; });
+  var want=Math.floor(adults.length * sec/900);
+  for(i=0;i<want && i<10;i++){
+    recalcOxygen();
+    if(G.oxyUse+RANK_O2[0] > G.oxyCap || G.fish.length>=44) break;
+    var par=adults[Math.floor(gameRnd()*adults.length)];
+    if(!par) break;
+    var kid=makeFish(par.sp,0,80+gameRnd()*(W-160),SURFACE+60+gameRnd()*180);
+    G.fish.push(kid); hatched++;
+  }
+  recalcOxygen();
+  if(!grown && !hatched) return null;
+  return { grown:grown, hatched:hatched, sec:sec };
+}
+function awayText(sec){
+  var h=Math.floor(sec/3600), m=Math.round((sec%3600)/60);
+  if(h>0) return h+'h '+m+'m';
+  return m+'m';
 }
 function hasSave(){
   try{ return !!localStorage.getItem(SAVE_KEY); }catch(e){ return false; }
@@ -1973,6 +2699,58 @@ function drawMenu(c){
   }
   text(c,VERSION,W-16,H-22,8,'rgba(160,220,230,0.6)','right');
   if(G.name) text(c,G.name.toUpperCase()+'   SPECIES '+speciesCount()+'/'+SPECIES_ORDER.length,16,H-22,8,'rgba(160,220,230,0.6)');
+}
+function drawSummary(c){
+  drawScene(c);
+  c.fillStyle='rgba(4,18,26,0.90)'; c.fillRect(0,0,W,H);
+  var s0=G.sess||{species:0,merges:0,pearls:0,found:[],t:Date.now()};
+  var mins=Math.max(1,Math.round((Date.now()-s0.t)/60000));
+  text(c,'THIS SESSION',W/2,24,14,'#8ffff0','center');
+  text(c,mins+' MINUTES IN THE TANK',W/2,50,8,'#7fbfc8','center');
+  panel(c,90,74,W-180,300,'#0a2a36');
+  var rows=[
+    ['MERGES',        (G.stats.merges|0)-s0.merges],
+    ['NEW SPECIES',   speciesCount()-s0.species],
+    ['MUTANTS MADE',  (G.stats.mutants|0)-s0.mutants],
+    ['CHIMERAS',      (G.stats.chimeras|0)-s0.chimeras],
+    ['PEARLS EARNED', G.pearls-s0.pearls]
+  ];
+  for(var i=0;i<rows.length;i++){
+    var y=94+i*30;
+    text(c,rows[i][0],120,y,8,'#bfe8f0');
+    var v=rows[i][1];
+    text(c,(v>0?'+':'')+v,330,y,10, v>0?'#3fd0a8':'#5f8b95','right');
+  }
+  if(s0.found.length){
+    text(c,'FOUND TODAY',400,94,8,'#7fbfc8');
+    for(var k=0;k<s0.found.length && k<5;k++){
+      var id=s0.found[k], img=fishFrames(id,1)[0];
+      var sc=Math.min(60/img.width,44/img.height,1);
+      c.drawImage(img,400,Math.round(112+k*46),Math.round(img.width*sc),Math.round(img.height*sc));
+      text(c,SPECIES[id].name,470,120+k*46,8,speciesTint(SPECIES[id],true));
+    }
+  } else {
+    text(c,'NOTHING NEW YET - THE TANK IS STILL WORKING ON IT',400,140,7,'#5f8b95');
+  }
+  panel(c,W/2-90,H-56,180,34,'#175f6d');
+  text(c,'TO MENU',W/2,H-46,10,'#eafffb','center');
+  BTN={ sumOk:{x:W/2-90,y:H-56,w:180,h:34} };
+}
+function drawAway(c){
+  if(!G.away) return;
+  var a=G.away;
+  var cw=440, cx=W/2-cw/2, cy=H/2-80;
+  c.fillStyle='rgba(4,18,26,0.78)'; c.fillRect(0,0,W,H);
+  panel(c,cx,cy,cw,160,'#0a2a36');
+  text(c,'WHILE YOU WERE AWAY',W/2,cy+16,12,'#8ffff0','center');
+  text(c,awayText(a.sec)+' PASSED IN THE TANK',W/2,cy+40,7,'#7fbfc8','center');
+  var ln=cy+66;
+  if(a.hatched){ text(c,a.hatched+(a.hatched===1?' FRY HATCHED':' FRY HATCHED'),W/2,ln,9,'#bfe8f0','center'); ln+=20; }
+  if(a.grown){ text(c,a.grown+' GREW UP AND ARE READY',W/2,ln,9,'#bfe8f0','center'); ln+=20; }
+  text(c,'NOTHING MERGED - THAT PART WAITS FOR YOU',W/2,cy+118,6,'#5f8b95','center');
+  panel(c,W/2-80,cy+130,160,24,'#175f6d');
+  text(c,'GOOD',W/2,cy+137,8,'#eafffb','center');
+  BTN.awayOk={x:W/2-80,y:cy+130,w:160,h:24};
 }
 function drawBoard(c){
   drawScene(c);
@@ -2101,11 +2879,13 @@ function render(){
   var c=ctx;
   c.clearRect(0,0,W,H);
   if(G.scene==='menu'){ drawMenu(c); return; }
+  if(G.scene==='summary'){ drawSummary(c); return; }
   if(G.scene==='board'){ drawBoard(c); return; }
   if(G.scene==='codex'){ drawCodex(c); return; }
   drawScene(c);
   drawUI(c);
   drawEvent(c);
+  drawAway(c);
 }
 
 /* ============================================================
@@ -2138,6 +2918,7 @@ function fishAt(p){
   return null;
 }
 function onDown(e){
+  armAudio();                        // iOS: never before the first touch
   var p=toLogical(e);
   G.ptr.x=p.x; G.ptr.y=p.y;
   if(G.scene==='menu'){
@@ -2146,9 +2927,13 @@ function onDown(e){
       else if(hit(BTN.no,p)) G.confirmNew=false;
       return;
     }
-    if(hit(BTN.cont,p)){ G.scene='tank'; save(); }
+    if(hit(BTN.cont,p)){ G.scene='tank'; sessionStart(); save(); }
     else if(hit(BTN.newg,p)) G.confirmNew=true;
     else if(hit(BTN.board,p)){ G.scene='board'; lbSubmit(); lbFetch(); }
+    return;
+  }
+  if(G.scene==='summary'){
+    if(hit(BTN.sumOk,p)){ G.scene='menu'; sessionStart(); save(); }
     return;
   }
   if(G.scene==='board'){
@@ -2167,6 +2952,7 @@ function onDown(e){
     return;
   }
   if(G.event) return;
+  if(dismissTip()) return;
   /* food tray */
   if(G.feedOpen){
     var ty=H-58-FOODS.length*30-8;
@@ -2175,12 +2961,17 @@ function onDown(e){
     }
   }
   if(G.buildOpen){
-    var bty=H-58-DECOR.length*30-8;
+    for(var vj=0;vj<BIOMES.length;vj++){
+      if(hit(BTN['bio'+vj],p)){ if(BIOMES[vj].id!==G.biome) setBiome(BIOMES[vj].id); return; }
+    }
+    var bty=H-58-DECOR.length*30-52;
     for(var bj=0;bj<DECOR.length;bj++){
-      if(p.x>168 && p.x<468 && p.y>bty+4+bj*30 && p.y<bty+30+bj*30){ G.buildIdx=bj; return; }
+      if(p.x>120 && p.x<540 && p.y>bty+48+bj*30 && p.y<bty+74+bj*30){ G.buildIdx=bj; return; }
     }
   }
-  if(hit(BTN.menu,p)){ G.scene='menu'; G.feedOpen=G.buildOpen=G.questsOpen=false; save(); lbSubmit(); return; }
+  if(G.away){ if(hit(BTN.awayOk,p) || true){ G.away=null; } return; }
+  if(hit(BTN.mute,p)){ audioMute(!AU.muted); return; }
+  if(hit(BTN.menu,p)){ G.scene = sessionEmpty() ? 'menu' : 'summary'; G.feedOpen=G.buildOpen=G.questsOpen=false; save(); lbSubmit(); return; }
   if(hit(BTN.feed,p)){ G.feedOpen=!G.feedOpen; G.buildOpen=false; G.questsOpen=false; return; }
   if(hit(BTN.build,p)){ G.buildOpen=!G.buildOpen; G.feedOpen=false; G.questsOpen=false; return; }
   if(hit(BTN.quests,p)){ G.questsOpen=!G.questsOpen; G.feedOpen=false; G.buildOpen=false; return; }
@@ -2231,10 +3022,15 @@ function onUp(){
    ============================================================ */
 function newGame(){
   G.pearls=60; G.discovered={}; G.unlocked={}; G.achs={};
-  G.stats={merges:0,mutants:0,chimeras:0,released:0};
+  G.stats={merges:0,mutants:0,chimeras:0,released:0,fed:0};
+  G.tips={}; G.tip=null; G.tipGap=0;
   G.fish=[]; G.decor=[]; G.quests=[]; G.pellets=[]; G.parts=[]; G.bubbles=[];
+  G.biome='pond'; G.biomesOwned={pond:true};
   G.event=null; G.timeScale=1; G.spawnTimer=0; G.codexSel=null; G.speed=1;
-  firstFish(); fillQuests(); recalcEnv(); recalcOxygen(); save();
+  G.sess=null; G.away=null;
+  firstFish(); fillQuests(); recalcEnv(); recalcOxygen();
+  AU.bpm=biomeDef('pond').bpm; SC=biomeDef('pond').scale;
+  bakeScene(); save();
 }
 function firstFish(){
   for(var i=0;i<BASE_IDS.length;i++){
@@ -2267,6 +3063,10 @@ function boot(){
   var had=load();
   if(!had || !G.fish.length){ newGame(); }
   fillQuests(); recalcEnv(); recalcOxygen(); checkAchs();
+  if(had && G._savedAt) G.away = runAway((Date.now()-G._savedAt)/1000);
+  sessionStart();
+  AU.bpm=biome().bpm; SC=biome().scale;
+  if(G.biome!=='pond') bakeScene();
   if(LB_URL) lbFetch();
   resize();
   window.addEventListener('resize',resize);
@@ -2275,7 +3075,19 @@ function boot(){
   cv.addEventListener('pointerup',onUp);
   cv.addEventListener('pointercancel',onUp);
   cv.addEventListener('pointerleave',onUp);
-  document.addEventListener('visibilitychange',save);
+  document.addEventListener('visibilitychange',function(){
+    save();
+    /* iOS suspends the context when the app goes to the background;
+       without this the sound comes back dead after switching apps */
+    if(!document.hidden) armAudio();
+  });
+  /* every kind of first gesture arms the sound */
+  var arm=function(){ armAudio(); };
+  document.addEventListener('pointerdown',arm,true);
+  document.addEventListener('touchstart',arm,true);
+  document.addEventListener('mousedown',arm,true);
+  document.addEventListener('click',arm,true);
+  document.addEventListener('keydown',arm,true);
   if(!G.name){
     var ov=document.getElementById('nameOv');
     ov.style.display='flex';
@@ -2288,7 +3100,7 @@ function boot(){
 }
 /* expose for the headless test harness */
 if(typeof window!=='undefined'){
-  window.__DG={G:G,SPECIES:SPECIES,SPR:SPR,ACHS:ACHS,LOCKED_BASE:LOCKED_BASE,availableBase:availableBase,newGame:newGame,checkAchs:checkAchs,bumpStat:bumpStat,LB:LB,lbVisible:lbVisible,hasSave:hasSave,fishFrames:fishFrames,fishGlow:fishGlow,SIGNAL:SIGNAL,releaseFish:releaseFish,EVENT_T:EVENT_T,WATER:WATER,tankFull:tankFull,RANK_O2:RANK_O2,DECOR:DECOR,DECOR_MAX:DECOR_MAX,QUEST_POOL:QUEST_POOL,placeDecor:placeDecor,removeDecor:removeDecor,recalcEnv:recalcEnv,questEvent:questEvent,fillQuests:fillQuests,questDef:questDef,save:save,update:update,render:render,tryMerge:tryMerge,mergeKind:mergeKind,CHIMERA:CHIMERA,CHIMERA_CHANCE:CHIMERA_CHANCE,chimeraKey:chimeraKey,
+  window.__DG={G:G,SPECIES:SPECIES,TIPS:TIPS,runAway:runAway,AWAY_CAP:AWAY_CAP,sessionStart:sessionStart,sessionEmpty:sessionEmpty,tipTick:tipTick,dismissTip:dismissTip,tipDef:tipDef,SPR:SPR,RIPEN:RIPEN,BIOMES:BIOMES,setBiome:setBiome,biomeDef:biomeDef,bakeScene:bakeScene,AU:AU,audioInit:audioInit,armAudio:armAudio,audioReady:audioReady,unlockSession:unlockSession,audioMute:audioMute,musicTick:musicTick,sfx:sfx,musicStep:musicStep,ACHS:ACHS,LOCKED_BASE:LOCKED_BASE,availableBase:availableBase,newGame:newGame,checkAchs:checkAchs,bumpStat:bumpStat,LB:LB,lbVisible:lbVisible,hasSave:hasSave,fishFrames:fishFrames,fishGlow:fishGlow,SIGNAL:SIGNAL,releaseFish:releaseFish,EVENT_T:EVENT_T,tankFull:tankFull,RANK_O2:RANK_O2,DECOR:DECOR,DECOR_MAX:DECOR_MAX,QUEST_POOL:QUEST_POOL,placeDecor:placeDecor,removeDecor:removeDecor,recalcEnv:recalcEnv,questEvent:questEvent,fillQuests:fillQuests,questDef:questDef,save:save,update:update,render:render,tryMerge:tryMerge,mergeKind:mergeKind,CHIMERA:CHIMERA,CHIMERA_CHANCE:CHIMERA_CHANCE,chimeraKey:chimeraKey,
     makeFish:makeFish,spawnFry:spawnFry,boot:boot,recalcOxygen:recalcOxygen,
     RANK_LEN:RANK_LEN,creatureCanvasSize:creatureCanvasSize,drawCreature:drawCreature,
     SPECIES_ORDER:SPECIES_ORDER,addPearls:addPearls,PEARL_CAP:PEARL_CAP,load:load,FOODS:FOODS};
@@ -2302,7 +3114,14 @@ boot();
 try{
   var host = (window.location && window.location.hostname) || '';
   var proto = (window.location && window.location.protocol) || '';
-  var USE_SW = proto==='https:' && !/itch|localhost|127\.0\.0\.1/.test(host);
+  /* A service worker must not run inside a sandbox. itch.io does NOT serve from
+     itch.io - it serves from a CDN like v6p9d9t4.ssl.hwcdn.net, inside an iframe.
+     Checking the hostname alone would have missed it, so the iframe test is the
+     one that actually does the work. */
+  var framed = false;
+  try{ framed = (window.self !== window.top); }catch(err){ framed = true; }
+  var USE_SW = proto==='https:' && !framed &&
+               !/itch|hwcdn|itch\.zone|localhost|127\.0\.0\.1/.test(host);
   if(USE_SW && typeof navigator!=='undefined' && navigator.serviceWorker){
     window.addEventListener('load',function(){
       navigator.serviceWorker.register('./sw.js').catch(function(){});
