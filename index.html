@@ -47,7 +47,7 @@
    Phase 1: core loop (swim / feed / grow / breed / merge / evolve)
    ============================================================ */
 
-var VERSION = 'v3.4';
+var VERSION = 'v4.0';
 var W = 960, H = 540;
 var SAVE_KEY = 'deepgarden_save_v1';
 var FLOOR = 476;          // substrate top
@@ -55,7 +55,7 @@ var SURFACE = 34;         // water surface
 var PEARL_CAP = 99999;
 var SPAWN_COOLDOWN = 30;  // seconds, NEW LIFE button
 var FRAMES = 6;           // swim animation frames
-var EVENT_T = 1.5;        // how long a discovery card holds the screen, seconds
+var EVENT_T = 0.75;       // how long a discovery card holds the screen, seconds
 var RIPEN = 60;           // seconds an adult needs before it will pair up on its own
 
 /* ---------- 1. PIXEL PRIMITIVES (PIXEL_ART_SPEC §1) ---------- */
@@ -819,30 +819,33 @@ var TIPS = [
     sub:'A HUNGRY FISH WILL NOT GROW UP',
     when:function(){ return G.frames>200 && (G.stats.fed||0)===0; } },
   { id:'grown',  at:null,     text:'THAT ONE IS ALL GROWN UP',
-    sub:'THE LITTLE BAR ABOVE IT IS A ONE MINUTE TIMER',
+    sub:'THE BAR ABOVE IT IS A ONE MINUTE TIMER',
     when:function(){ return anyFish(function(f){ return f.age>=1 && f.ripe>0 && f.ripe<RIPEN-2; }); } },
   { id:'ready',  at:null,     text:'THE CHAIN LINKS MEAN: READY',
-    sub:'TWO READY FISH OF THE SAME KIND WILL PAIR UP ON THEIR OWN',
+    sub:'TWO READY FISH OF ONE KIND PAIR UP ON THEIR OWN',
     when:function(){ return anyFish(function(f){ return f.ready; }); } },
   { id:'drag',   at:null,     text:'YOU DO NOT HAVE TO WAIT',
     sub:'DRAG ONE GROWN FISH ONTO ANOTHER OF THE SAME KIND',
     when:function(){ return (G.stats.merges||0)===0 && twoAdultsAlike(); } },
   { id:'food',   at:'feed',   text:'SPECIAL FOOD DECIDES WHAT THEY BECOME',
-    sub:'GLOW PLANKTON MAKES LIGHT. ALGAE MAKES GARDENS. YOUR CHOICE.',
+    sub:'GLOW PLANKTON MAKES LIGHT. ALGAE MAKES GARDENS.',
     when:function(){ return (G.stats.merges||0)>=2; } },
   { id:'build',  at:'build',  text:'PLANTS AND ROCKS LEAN THE WHOLE TANK',
-    sub:'AND THEY KEEP LEANING IT, LONG AFTER YOU STOP FEEDING',
+    sub:'LONG AFTER YOU STOP FEEDING',
     when:function(){ return (G.stats.merges||0)>=6; } },
-  { id:'l3',     at:null,     text:'RANK 3. TWO OF THESE WILL EVOLVE INTO SOMETHING NEW',
-    sub:'WHAT THEY ATE DECIDES WHICH WAY THE BRANCH GOES',
+  { id:'l3',     at:null,     text:'RANK 3. TWO OF THESE EVOLVE INTO SOMETHING NEW',
+    sub:'WHAT THEY ATE DECIDES WHICH WAY IT GOES',
     when:function(){ return anyFish(function(f){ return f.rank===2; }); } },
   { id:'mutant', at:null,     text:'DRAG DIFFERENT RANKS TOGETHER ON PURPOSE',
-    sub:'25% YOU GET A MUTANT. THE YELLOW RING MEANS THAT CHANCE.',
+    sub:'25% YOU GET A MUTANT. YELLOW RING = THAT CHANCE.',
     when:function(){ return (G.stats.merges||0)>=4 && anyFish(function(f){ return f.rank>0; }); } },
-  { id:'chim',   at:null,     text:'TWO GROWN MUTANTS: 10% A CHIMERA, 90% YOU LOSE BOTH',
-    sub:'THE RED RING IS THE WARNING. THE GAME WILL NEVER DO IT FOR YOU.',
+  { id:'chim',   at:null,     text:'TWO MUTANTS: 10% A CHIMERA, 90% LOSE BOTH',
+    sub:'THE RED RING WARNS YOU. THE GAME NEVER DOES IT ITSELF.',
     when:function(){ return (G.stats.mutants||0)>=1; } },
-  { id:'codex',  at:'codex',  text:'THE CODEX TELLS YOU HOW EVERY CREATURE IS MADE',
+  { id:'release', at:null,    text:'TANK FULL? DRAG A FISH TO THE GREEN BAR',
+    sub:'IT SWIMS OFF, AND STAYS IN YOUR CODEX',
+    when:function(){ return G.oxyUse > G.oxyCap*0.8; } },
+  { id:'codex',  at:'codex',  text:'THE CODEX SHOWS HOW EVERY CREATURE IS MADE',
     sub:'EVEN THE ONES YOU HAVE NEVER SEEN',
     when:function(){ return speciesCount()>=6; } }
 ];
@@ -1718,10 +1721,10 @@ var G = {
   oxyCap:150, oxyUse:0, stagnant:false,
   speed:1, spawnTimer:0,
   feedOpen:false, foodIdx:0,
-  buildOpen:false, buildIdx:0, questsOpen:false,
+  buildOpen:false, buildIdx:0, buildTab:'decor', questsOpen:false,
   drag:null, dragOff:{x:0,y:0}, ptr:{x:0,y:0},
   event:null,            // {title,sub,id,t}
-  codexSel:null, confirmNew:false,
+  codexSel:null, codexPage:0, confirmNew:false,
   timeScale:1,
   toast:null,
   t:0, frames:0,
@@ -2301,9 +2304,11 @@ function drawScene(c){
     var dimg=SPR.decor[dd.id] ? SPR.decor[dd.id][dd.v||0] : null;
     if(!dimg) continue;
     c.drawImage(dimg, Math.round(dd.x-dimg.width/2), FLOOR-dimg.height+6);
-    if(G.buildOpen){
-      c.globalAlpha=0.5+Math.sin(G.t*6)*0.2;
-      text(c,'TAP TO REMOVE',dd.x,FLOOR-dimg.height-10,6,'#ffd400','center');
+    if(G.buildOpen && G.buildTab==='decor'){
+      c.globalAlpha=0.55+Math.sin(G.t*6)*0.2;
+      circ(c,dd.x,FLOOR-dimg.height-12,9,'#06202a');
+      rp(c,dd.x-5,FLOOR-dimg.height-13,10,3,'#ff2828');
+      rp(c,dd.x-1,FLOOR-dimg.height-17,3,10,'#ff2828');
       c.globalAlpha=1;
     }
   }
@@ -2319,6 +2324,25 @@ function drawScene(c){
   for(var a=0;a<far.length;a++) drawFish(c,far[a],0.78);
   c.fillStyle='rgba(28,110,126,0.28)'; c.fillRect(0,SURFACE-8,W,FLOOR-SURFACE+16);
   for(var b=0;b<near.length;b++) drawFish(c,near[b],1);
+
+  /* a ghost of what you are about to plant, exactly where it will stand */
+  if(G.buildOpen && G.buildTab==='decor' && G.ptr.y>44 && G.ptr.y<H-62-90){
+    var gd=DECOR[G.buildIdx];
+    var gimg=gd && SPR.decor[gd.id] ? SPR.decor[gd.id][0] : null;
+    if(gimg){
+      var gx2=Math.max(40,Math.min(W-40,G.ptr.x));
+      var blocked = decorAt(gx2)>=0 || G.pearls<gd.cost || G.decor.length>=DECOR_MAX;
+      c.globalAlpha=0.75;
+      for(var gy=FLOOR-gimg.height+6;gy<FLOOR+4;gy+=8) rp(c,gx2,gy,1,4, blocked?'#ff2828':'#00ff5a');
+      c.globalAlpha=blocked?0.30:0.62;
+      c.drawImage(gimg, Math.round(gx2-gimg.width/2), FLOOR-gimg.height+6);
+      c.globalAlpha=1;
+      var lbl = G.pearls<gd.cost ? 'NOT ENOUGH PEARLS'
+              : (G.decor.length>=DECOR_MAX ? 'NO ROOM LEFT'
+              : (decorAt(gx2)>=0 ? 'SOMETHING IS ALREADY HERE' : gd.name+'  -'+gd.cost));
+      text(c,lbl,gx2,FLOOR-gimg.height-12,6, blocked?'#ff2828':'#00ff5a','center');
+    }
+  }
 
   /* pellets */
   for(var p2=0;p2<G.pellets.length;p2++){
@@ -2410,7 +2434,13 @@ function drawFish(c,f,alpha){
 }
 
 /* ---------- UI ---------- */
+/* A phone squeezes the 960x540 field to about 0.72 of itself, so an 8px label
+   lands as 5.8 real pixels. The brief says never below 11 - and it was right.
+   One place to enforce it, instead of 70 literals. */
+var UI_SCALE = 1.5, UI_MIN = 14;   // 14 logical px = ~10 real px on a phone. 11 was still too small.
+function ts(size){ return Math.max(UI_MIN, Math.round(size*UI_SCALE)); }
 function text(c,s,x,y,size,col,align){
+  size = ts(size);
   c.font=size+'px "Press Start 2P", monospace';
   c.textAlign=align||'left'; c.textBaseline='top';
   c.fillStyle='#04121a'; c.fillText(s,x+2,y+2);
@@ -2423,26 +2453,26 @@ function panel(c,x,y,w,h,col){
 }
 var BTN={};
 function layoutButtons(){
-  var ws=[150,150,164,92,150,140], x=18, y=H-58, gap=8;
+  var ws=[150,150,150,96,150,150], x=27, y=H-62, gap=8;
   var keys=['feed','build','life','speed','quests','codex'];
   var labels=['FEED','BUILD','NEW LIFE','x'+G.speed,'QUESTS','CODEX'];
   BTN={};
   for(var i=0;i<keys.length;i++){
-    BTN[keys[i]]={x:x,y:y,w:ws[i],h:42,label:labels[i]};
+    BTN[keys[i]]={x:x,y:y,w:ws[i],h:46,label:labels[i]};
     x+=ws[i]+gap;
   }
 }
 function drawUI(c){
   layoutButtons();
   /* top status */
-  panel(c,10,8,W-20,26,'#0a2a36');
+  panel(c,10,6,W-20,34,'#0a2a36');
   text(c,'\u25c4 '+(G.name||'GARDENER').toUpperCase(),20,14,10,'#7fe9d0');
-  BTN.menu={x:12,y:8,w:180,h:26};
-  text(c,'PEARLS '+G.pearls,300,14,10,'#ffd98a');
-  text(c,'SPECIES '+speciesCount()+'/'+SPECIES_ORDER.length,470,14,10,'#b8f6ff');
+  BTN.menu={x:12,y:6,w:230,h:34};
+  text(c,'PEARLS '+G.pearls,330,14,10,'#ffd98a');
+  text(c,'SPECIES '+speciesCount()+'/'+SPECIES_ORDER.length,540,14,10,'#b8f6ff');
   /* mute */
   var mx=W-30;
-  BTN.mute={x:mx-12,y:8,w:26,h:26};
+  BTN.mute={x:mx-16,y:6,w:34,h:34};
   rp(c,mx-8,16,3,6,AU.muted?'#5f8b95':'#7fe9d0');
   tri(c,mx-1,19,6,5,0,AU.muted?'#5f8b95':'#7fe9d0',0);
   if(AU.muted){ rp(c,mx+2,14,1,12,'#ff8fb0'); rp(c,mx+3,15,1,10,'#ff8fb0'); }
@@ -2450,22 +2480,22 @@ function drawUI(c){
   if(!AU.muted && !audioReady()) text(c,'TAP FOR SOUND',mx-24,15,7,'#ffd400','right');
 
   /* oxygen bar */
-  var ow=180, ox=W-ow-56;
-  rp(c,ox-1,13,ow+2,12,'#06202a');
+  var ow=150, ox=W-ow-60;
+  rp(c,ox-1,14,ow+2,14,'#06202a');
   var frac=Math.min(1.4,G.oxyUse/G.oxyCap);
   var fw=Math.round(Math.min(1,frac)*ow);
-  rp(c,ox,14,fw,10, G.stagnant?'#e0525a':'#3fd0a8');
-  text(c,'O2',ox-26,14,9,'#9fe8dc');
-  if(G.stagnant) text(c,'CROWDED - EVERYTHING GROWS SLOWLY. MERGE SOME FISH.',W/2,42,9,'#ffb0b0','center');
+  rp(c,ox,15,fw,12, G.stagnant?'#e0525a':'#3fd0a8');
+  text(c,'O2',ox-34,15,9,'#9fe8dc');
+  if(G.stagnant) text(c,'CROWDED - MERGE OR RELEASE SOME FISH',W/2,46,8,'#ffb0b0','center');
 
   /* while a fish is in hand the whole button bar turns into one safe drop target */
   if(G.drag){
-    var rp2={x:18,y:H-58,w:W-36,h:42};
+    var rp2={x:12,y:H-62,w:W-24,h:46};
     var glow=0.5+Math.sin(G.t*6)*0.3;
     c.globalAlpha=glow; rp(c,rp2.x-6,rp2.y-6,rp2.w+12,rp2.h+12,'#1d5f4a'); c.globalAlpha=1;
     panel(c,rp2.x,rp2.y,rp2.w,rp2.h,'#176d4e');
-    text(c,'DROP HERE TO RELEASE  -  IT STAYS IN YOUR CODEX',W/2,rp2.y+15,10,'#dfffe8','center');
-    text(c,VERSION,W-16,H-14,8,'rgba(160,220,230,0.5)','right');
+    text(c,'DROP HERE TO RELEASE IT',W/2,rp2.y+16,10,'#dfffe8','center');
+  
     return;
   }
 
@@ -2475,11 +2505,13 @@ function drawUI(c){
     var ready = (k==='life' && G.spawnTimer<=0 && !tankFull());
     panel(c,b.x,b.y,b.w,b.h, ready ? '#175f6d':'#0e3a47');
     var lab=b.label;
-    if(k==='life' && tankFull()) lab='TANK FULL';
-    else if(k==='life' && G.spawnTimer>0) lab='WAIT '+Math.ceil(G.spawnTimer)+'s';
-    if(k==='feed') lab='FEED: '+FOODS[G.foodIdx].name.split(' ')[0];
-    if(k==='build') lab='BUILD '+G.decor.length+'/'+DECOR_MAX;
-    text(c,lab,b.x+b.w/2,b.y+15,10, (k==='life'&&!ready)?'#5f8b95':'#eafffb','center');
+    if(k==='life' && tankFull()) lab='FULL';
+    else if(k==='life' && G.spawnTimer>0) lab=Math.ceil(G.spawnTimer)+'s';
+
+    text(c,lab,b.x+b.w/2,b.y+16,10, (k==='life'&&!ready)?'#5f8b95':'#eafffb','center');
+    /* the selected food shows as its own colour, not as a word that will not fit */
+    if(k==='feed'){ circ(c,b.x+16,b.y+b.h-9,4,'#06202a'); circ(c,b.x+16,b.y+b.h-9,3,FOODS[G.foodIdx].col); }
+    if(k==='build') text(c,G.decor.length+'/'+DECOR_MAX,b.x+b.w-8,b.y+b.h-13,5,'#7fbfc8','right');
   }
   /* food tray */
   if(G.feedOpen){
@@ -2494,33 +2526,61 @@ function drawUI(c){
       text(c,f.cost?(''+f.cost):'FREE',248,yy+9,8, f.cost?'#ffd98a':'#8fd8c8','right');
     }
   }
-  /* build tray: the tank itself on top, the things you put in it underneath */
+  /* BUILD: a strip, not a wall. You see what you picked, and a ghost of it
+     standing exactly where it will stand. The old list covered half the tank
+     and you tapped blind. */
   if(G.buildOpen){
-    var by2=H-58-DECOR.length*30-52;
-    panel(c,120,by2,420,DECOR.length*30+50,'#0a2a36');
-    text(c,'TANK',130,by2+6,7,'#7fbfc8');
-    for(var vi=0;vi<BIOMES.length;vi++){
-      var bm=BIOMES[vi], bxx=126+vi*102, own=!!G.biomesOwned[bm.id], cur=(G.biome===bm.id);
-      panel(c,bxx,by2+18,98,24, cur?'#175f6d':(own?'#0e3a47':'#0b2b36'));
-      text(c,bm.name.split(' ')[bm.name.split(' ').length-1],bxx+49,by2+24,6, cur?'#eafffb':(own?'#9fe8dc':'#5f8b95'),'center');
-      if(!own) text(c,''+bm.cost,bxx+49,by2+34,5, G.pearls>=bm.cost?'#ffd98a':'#8a5a5a','center');
-      BTN['bio'+vi]={x:bxx,y:by2+18,w:98,h:24};
+    var sy=H-62-86, sh2=82;
+    panel(c,10,sy,W-20,sh2,'#0a2a36');
+    var tabs=[['decor','DECOR'],['tank','TANK']];
+    for(var ti=0;ti<2;ti++){
+      var tb={x:16,y:sy+4+ti*38,w:104,h:34};
+      panel(c,tb.x,tb.y,tb.w,tb.h, G.buildTab===tabs[ti][0]?'#175f6d':'#0b2b36');
+      text(c,tabs[ti][1],tb.x+tb.w/2,tb.y+10,8, G.buildTab===tabs[ti][0]?'#eafffb':'#7fbfc8','center');
+      BTN['tab'+ti]=tb;
     }
-    for(var bi=0;bi<DECOR.length;bi++){
-      var d=DECOR[bi], yy2=by2+48+bi*30;
-      if(bi===G.buildIdx) rp(c,122,yy2,416,26,'#175f6d');
-      circ(c,136,yy2+13,4,'#101820'); circ(c,136,yy2+13,3,DPAL[d.id][3]);
-      text(c,d.name,150,yy2+9,8,'#eafffb');
-      text(c,'+'+d.axis.slice(0,4)+(d.o2?' +'+d.o2+'O2':''),330,yy2+9,6,'#8fd8c8');
-      text(c,''+d.cost,532,yy2+9,8, G.pearls>=d.cost?'#ffd98a':'#8a5a5a','right');
+    if(G.buildTab==='decor'){
+      for(var bi=0;bi<DECOR.length;bi++){
+        var d=DECOR[bi], sx2=130+bi*136, sel=(bi===G.buildIdx);
+        var slot={x:sx2,y:sy+4,w:130,h:74};
+        panel(c,slot.x,slot.y,slot.w,slot.h, sel?'#175f6d':'#0b2b36');
+        var dimg2=SPR.decor[d.id] ? SPR.decor[d.id][0] : null;
+        if(dimg2){
+          var dsc=Math.min(48/dimg2.width, 44/dimg2.height, 1);
+          var dw2=Math.max(2,Math.round(dimg2.width*dsc)), dh2=Math.max(2,Math.round(dimg2.height*dsc));
+          c.drawImage(dimg2, Math.round(slot.x+(slot.w-dw2)/2), Math.round(slot.y+48-dh2), dw2, dh2);
+        }
+        text(c,d.name.split(' ')[0],slot.x+slot.w/2,slot.y+54,5, sel?'#eafffb':'#9fe8dc','center');
+        text(c,''+d.cost,slot.x+slot.w-6,slot.y+6,5, G.pearls>=d.cost?'#ffd98a':'#8a5a5a','right');
+        BTN['slot'+bi]=slot;
+      }
+      /* what you picked, spelled out - the slot is too small to say it all */
+      var pk=DECOR[G.buildIdx];
+      if(pk) text(c, pk.name+'  -  PULLS '+pk.axis+(pk.o2?'  -  +'+pk.o2+' OXYGEN':'')+'  -  '+pk.cost+' PEARLS',
+                  W/2,sy-18,7,'#ffd98a','center');
+    } else {
+      for(var vi=0;vi<BIOMES.length;vi++){
+        var bm=BIOMES[vi], bxx=130+vi*200, own=!!G.biomesOwned[bm.id], cur=(G.biome===bm.id);
+        var chip={x:bxx,y:sy+4,w:194,h:74};
+        panel(c,chip.x,chip.y,chip.w,chip.h, cur?'#175f6d':(own?'#0e3a47':'#0b2b36'));
+        var bwords=bm.name.split(' ');
+        text(c,bwords[bwords.length-1],chip.x+chip.w/2,chip.y+10,8, cur?'#eafffb':(own?'#9fe8dc':'#5f8b95'),'center');
+        var ax3='';
+        for(var kx in bm.axes) ax3+=(ax3?' ':'')+kx;
+        text(c,ax3,chip.x+chip.w/2,chip.y+32,5,'#8fd8c8','center');
+        text(c, cur?'YOU ARE HERE':(own?'TAP TO MOVE IN':bm.cost+' PEARLS'),
+             chip.x+chip.w/2,chip.y+52,5, cur?'#3fd0a8':(own?'#7fbfc8':(G.pearls>=bm.cost?'#ffd98a':'#8a5a5a')),'center');
+        BTN['bio'+vi]=chip;
+      }
+      text(c,'EACH TANK PULLS EVOLUTION ITS OWN WAY',W/2,sy-18,7,'#7fbfc8','center');
     }
-    text(c,'PICK ONE, THEN TAP THE FLOOR',330,by2-14,7,'#7fbfc8','center');
   }
+
   /* achievements: the only source of new base species */
   if(G.questsOpen){
     var ay=88;
     panel(c,W-336,ay,320,ACHS.length*34+22,'#0a2a36');
-    text(c,'ACHIEVEMENTS - EACH UNLOCKS A SPECIES',W-176,ay+6,6,'#7fbfc8','center');
+    text(c,'ACHIEVEMENTS',W-176,ay+6,6,'#7fbfc8','center');
     for(var ai2=0;ai2<ACHS.length;ai2++){
       var ac=ACHS[ai2], ayy=ay+20+ai2*34, done=!!G.achs[ac.id];
       var got=Math.min(ac.goal,G.stats[ac.stat]||0);
@@ -2555,21 +2615,27 @@ function drawUI(c){
   for(ei=0;ei<AXES.length;ei++) if(G.env[AXES[ei]]>0) envTxt+=(envTxt?'  ':'')+AXES[ei]+' x'+G.env[AXES[ei]];
   if(envTxt) text(c,'TANK LEANS: '+envTxt,W/2,56,7,'rgba(160,230,240,0.65)','center');
 
+  /* the valve has to announce itself - the children never found it */
+  if(!G.drag && !G.tip && G.oxyUse > G.oxyCap*0.92){
+    var pw2=0.4+Math.sin(G.t*4)*0.25;
+    c.globalAlpha=pw2*0.5; rp(c,12,H-62,W-24,46,'#176d4e'); c.globalAlpha=1;
+    text(c,'TANK FULL - DRAG A FISH DOWN HERE TO FREE IT',W/2,H-50,9,'#8fffc8','center');
+  }
+
   /* the tip card */
   if(G.tip){
     var td=tipDef(G.tip.id);
     if(td){
-      var tw=580, tx2=W/2-tw/2, ty3=H-124;
+      var tw=760, tx2=W/2-tw/2, ty3=H-146;
       c.globalAlpha=0.5+Math.sin(G.t*4)*0.12;
       rp(c,tx2-5,ty3-5,tw+10,52,'#1d6b7a'); c.globalAlpha=1;
-      panel(c,tx2,ty3,tw,42,'#0d3a48');
-      text(c,td.text,W/2,ty3+9,8,'#ffd400','center');
-      text(c,td.sub,W/2,ty3+24,6,'#bfe8f0','center');
-      text(c,'TAP TO CLOSE',W/2,ty3+32,5,'rgba(160,220,230,0.5)','center');
+      panel(c,tx2,ty3,tw,58,'#0d3a48');
+      text(c,td.text,W/2,ty3+8,8,'#ffd400','center');
+      text(c,td.sub,W/2,ty3+30,6,'#bfe8f0','center');
       /* an arrow that points at the button it is talking about */
       if(td.at && BTN[td.at]){
         var b3=BTN[td.at], ax2=b3.x+b3.w/2;
-        for(var q3=0;q3<9;q3++) rp(c,ax2-(8-q3),ty3+44+q3,(8-q3)*2,1,'#ffd400');
+        for(var q3=0;q3<11;q3++) rp(c,ax2-(10-q3),ty3+60+q3,(10-q3)*2,1,'#ffd400');
         c.globalAlpha=0.35+Math.sin(G.t*7)*0.2;
         rp(c,b3.x-3,b3.y-3,b3.w+6,b3.h+6,'#ffd400'); c.globalAlpha=1;
       }
@@ -2582,8 +2648,8 @@ function drawUI(c){
     text(c,G.toast.msg,W/2,H-101,9,'#ffd98a','center');
   }
   /* hint */
-  if(G.fish.length && !G.event) text(c,'DRAG ONE FISH ONTO ANOTHER OF THE SAME KIND',W/2,H-76,8,'rgba(180,240,255,0.5)','center');
-  text(c,VERSION,W-16,H-14,8,'rgba(160,220,230,0.5)','right');
+
+
 }
 function drawEvent(c){
   if(!G.event) return;
@@ -2783,9 +2849,11 @@ function drawBoard(c){
   BTN={ week:{x:W/2-160,y:44,w:150,h:26}, all:{x:W/2+10,y:44,w:150,h:26},
         refresh:{x:W/2-190,y:H-52,w:180,h:32}, back:{x:W/2+10,y:H-52,w:180,h:32} };
 }
+var CODEX_PER_PAGE = 20;
+function codexPages(){ return Math.ceil(SPECIES_ORDER.length/CODEX_PER_PAGE); }
 function codexCell(i){
-  var cols=8, cw=113, ch=72;
-  return { x:12+(i%cols)*(cw+4), y:40+Math.floor(i/cols)*(ch+4), w:cw, h:ch };
+  var k=i%CODEX_PER_PAGE, cols=5, cw=182, ch=96;
+  return { x:16+(k%cols)*(cw+4), y:52+Math.floor(k/cols)*(ch+4), w:cw, h:ch };
 }
 function nameOf(id){ return SPECIES[id] ? SPECIES[id].name : '?'; }
 function foodForAxis(ax){
@@ -2856,24 +2924,29 @@ function drawCodex(c){
   drawScene(c);
   c.fillStyle='rgba(4,18,26,0.90)'; c.fillRect(0,0,W,H);
   if(G.codexSel && SPECIES[G.codexSel]){ drawCodexCard(c); return; }
-  text(c,'CODEX  '+speciesCount()+'/'+SPECIES_ORDER.length,W/2,14,12,'#8ffff0','center');
-  for(var i=0;i<SPECIES_ORDER.length;i++){
+  text(c,'CODEX  '+speciesCount()+'/'+SPECIES_ORDER.length,W/2,12,12,'#8ffff0','center');
+  var pg=G.codexPage|0, from=pg*CODEX_PER_PAGE, to=Math.min(SPECIES_ORDER.length,from+CODEX_PER_PAGE);
+  for(var i=from;i<to;i++){
     var id=SPECIES_ORDER[i], sp=SPECIES[id], r=codexCell(i);
     var known=!!G.discovered[id];
     panel(c,r.x,r.y,r.w,r.h, known?'#0a2a36':'#08202a');
     var img=fishFrames(id,1)[0];
-    var sc=Math.min((r.w-10)/img.width,(r.h-20)/img.height,1);
+    var sc=Math.min((r.w-16)/img.width,(r.h-28)/img.height,1);
     var iw=Math.max(2,Math.round(img.width*sc)), ih=Math.max(2,Math.round(img.height*sc));
-    var ix=Math.round(r.x+(r.w-iw)/2), iy=Math.round(r.y+2);
+    var ix=Math.round(r.x+(r.w-iw)/2), iy=Math.round(r.y+3);
     if(known) c.drawImage(img,ix,iy,iw,ih);
     else { c.save(); c.drawImage(img,ix,iy,iw,ih); c.globalCompositeOperation='source-atop';
            c.fillStyle='#12313d'; c.fillRect(ix,iy,iw,ih); c.restore(); }
-    var nm = known ? (sp.name.length>15 ? sp.name.slice(0,14)+'.' : sp.name) : '? ? ?';
-    text(c,nm,r.x+r.w/2,r.y+r.h-11,5,speciesTint(sp,known),'center');
+    var nm = known ? (sp.name.length>12 ? sp.name.slice(0,11)+'.' : sp.name) : '? ? ?';
+    text(c,nm,r.x+r.w/2,r.y+r.h-17,6,speciesTint(sp,known),'center');
   }
-  panel(c,W/2-70,H-38,140,28,'#175f6d');
-  text(c,'BACK',W/2,H-30,10,'#eafffb','center');
-  BTN={back:{x:W/2-70,y:H-38,w:140,h:28}};
+  var np=codexPages();
+  panel(c,W/2-250,H-44,90,34,'#175f6d');  text(c,'\u25c4',W/2-205,H-34,10,'#eafffb','center');
+  text(c,'PAGE '+(pg+1)+' / '+np,W/2-100,H-34,8,'#9fe8dc','center');
+  panel(c,W/2-40,H-44,90,34,'#175f6d');   text(c,'\u25ba',W/2+5,H-34,10,'#eafffb','center');
+  panel(c,W/2+90,H-44,160,34,'#0e3a47');  text(c,'BACK',W/2+170,H-34,10,'#eafffb','center');
+  BTN={ prev:{x:W/2-250,y:H-44,w:90,h:34}, next:{x:W/2-40,y:H-44,w:90,h:34},
+        back:{x:W/2+90,y:H-44,w:160,h:34} };
 }
 function render(){
   var c=ctx;
@@ -2946,7 +3019,10 @@ function onDown(e){
   if(G.scene==='codex'){
     if(G.codexSel){ if(hit(BTN.back,p)) G.codexSel=null; return; }
     if(hit(BTN.back,p)){ G.scene='tank'; return; }
-    for(var ci=0;ci<SPECIES_ORDER.length;ci++){
+    if(hit(BTN.prev,p)){ G.codexPage=(G.codexPage-1+codexPages())%codexPages(); return; }
+    if(hit(BTN.next,p)){ G.codexPage=(G.codexPage+1)%codexPages(); return; }
+    var cf=G.codexPage*CODEX_PER_PAGE, ct=Math.min(SPECIES_ORDER.length,cf+CODEX_PER_PAGE);
+    for(var ci=cf;ci<ct;ci++){
       if(hit(codexCell(ci),p)){ G.codexSel=SPECIES_ORDER[ci]; return; }
     }
     return;
@@ -2961,12 +3037,16 @@ function onDown(e){
     }
   }
   if(G.buildOpen){
-    for(var vj=0;vj<BIOMES.length;vj++){
-      if(hit(BTN['bio'+vj],p)){ if(BIOMES[vj].id!==G.biome) setBiome(BIOMES[vj].id); return; }
-    }
-    var bty=H-58-DECOR.length*30-52;
-    for(var bj=0;bj<DECOR.length;bj++){
-      if(p.x>120 && p.x<540 && p.y>bty+48+bj*30 && p.y<bty+74+bj*30){ G.buildIdx=bj; return; }
+    if(hit(BTN.tab0,p)){ G.buildTab='decor'; return; }
+    if(hit(BTN.tab1,p)){ G.buildTab='tank'; return; }
+    if(G.buildTab==='tank'){
+      for(var vj=0;vj<BIOMES.length;vj++){
+        if(hit(BTN['bio'+vj],p)){ if(BIOMES[vj].id!==G.biome) setBiome(BIOMES[vj].id); return; }
+      }
+    } else {
+      for(var bj=0;bj<DECOR.length;bj++){
+        if(hit(BTN['slot'+bj],p)){ G.buildIdx=bj; return; }
+      }
     }
   }
   if(G.away){ if(hit(BTN.awayOk,p) || true){ G.away=null; } return; }
@@ -2982,11 +3062,11 @@ function onDown(e){
     return;
   }
   if(hit(BTN.speed,p)){ G.speed = G.speed===1?2:(G.speed===2?4:1); return; }
-  if(hit(BTN.codex,p)){ G.scene='codex'; G.codexSel=null; return; }
-  if(p.y>H-64 || p.y<40) return;
-  if(G.buildOpen){
+  if(hit(BTN.codex,p)){ G.scene='codex'; G.codexSel=null; G.codexPage=0; return; }
+  if(p.y>H-68 || p.y<44) return;
+  if(G.buildOpen && G.buildTab==='decor'){
     var ex=decorAt(p.x);
-    if(ex>=0 && p.y>FLOOR-140) removeDecor(ex);
+    if(ex>=0) removeDecor(ex);
     else placeDecor(p.x);
     return;
   }
@@ -2996,9 +3076,9 @@ function onDown(e){
   else dropFood(p.x,p.y);
 }
 function onMove(e){
-  if(!G.drag) return;
   var p=toLogical(e);
   G.ptr.x=p.x; G.ptr.y=p.y;
+  if(!G.drag) return;
   G.drag.x=Math.max(24,Math.min(W-24,p.x+G.dragOff.x));
   G.drag.y=Math.max(SURFACE+14,Math.min(FLOOR-8,p.y+G.dragOff.y));
   G.drag.vx=0; G.drag.vy=0;
@@ -3006,7 +3086,7 @@ function onMove(e){
 function onUp(){
   if(!G.drag) return;
   var d=G.drag; d.held=false; G.drag=null;
-  if(G.ptr.y>H-64){ releaseFish(d); return; }      // dropped on the bar = let it go
+  if(G.ptr.y>H-68){ releaseFish(d); return; }      // dropped on the bar = let it go
   var best=null,bd=1e9;
   for(var i=0;i<G.fish.length;i++){
     var f=G.fish[i];
@@ -3100,7 +3180,7 @@ function boot(){
 }
 /* expose for the headless test harness */
 if(typeof window!=='undefined'){
-  window.__DG={G:G,SPECIES:SPECIES,TIPS:TIPS,runAway:runAway,AWAY_CAP:AWAY_CAP,sessionStart:sessionStart,sessionEmpty:sessionEmpty,tipTick:tipTick,dismissTip:dismissTip,tipDef:tipDef,SPR:SPR,RIPEN:RIPEN,BIOMES:BIOMES,setBiome:setBiome,biomeDef:biomeDef,bakeScene:bakeScene,AU:AU,audioInit:audioInit,armAudio:armAudio,audioReady:audioReady,unlockSession:unlockSession,audioMute:audioMute,musicTick:musicTick,sfx:sfx,musicStep:musicStep,ACHS:ACHS,LOCKED_BASE:LOCKED_BASE,availableBase:availableBase,newGame:newGame,checkAchs:checkAchs,bumpStat:bumpStat,LB:LB,lbVisible:lbVisible,hasSave:hasSave,fishFrames:fishFrames,fishGlow:fishGlow,SIGNAL:SIGNAL,releaseFish:releaseFish,EVENT_T:EVENT_T,tankFull:tankFull,RANK_O2:RANK_O2,DECOR:DECOR,DECOR_MAX:DECOR_MAX,QUEST_POOL:QUEST_POOL,placeDecor:placeDecor,removeDecor:removeDecor,recalcEnv:recalcEnv,questEvent:questEvent,fillQuests:fillQuests,questDef:questDef,save:save,update:update,render:render,tryMerge:tryMerge,mergeKind:mergeKind,CHIMERA:CHIMERA,CHIMERA_CHANCE:CHIMERA_CHANCE,chimeraKey:chimeraKey,
+  window.__DG={G:G,SPECIES:SPECIES,TIPS:TIPS,ts:ts,UI_MIN:UI_MIN,codexPages:codexPages,CODEX_PER_PAGE:CODEX_PER_PAGE,codexCell:codexCell,runAway:runAway,AWAY_CAP:AWAY_CAP,sessionStart:sessionStart,sessionEmpty:sessionEmpty,tipTick:tipTick,dismissTip:dismissTip,tipDef:tipDef,SPR:SPR,RIPEN:RIPEN,BIOMES:BIOMES,setBiome:setBiome,biomeDef:biomeDef,bakeScene:bakeScene,AU:AU,audioInit:audioInit,armAudio:armAudio,audioReady:audioReady,unlockSession:unlockSession,audioMute:audioMute,musicTick:musicTick,sfx:sfx,musicStep:musicStep,ACHS:ACHS,LOCKED_BASE:LOCKED_BASE,availableBase:availableBase,newGame:newGame,checkAchs:checkAchs,bumpStat:bumpStat,LB:LB,lbVisible:lbVisible,hasSave:hasSave,fishFrames:fishFrames,fishGlow:fishGlow,SIGNAL:SIGNAL,releaseFish:releaseFish,EVENT_T:EVENT_T,tankFull:tankFull,RANK_O2:RANK_O2,DECOR:DECOR,DECOR_MAX:DECOR_MAX,QUEST_POOL:QUEST_POOL,placeDecor:placeDecor,removeDecor:removeDecor,recalcEnv:recalcEnv,questEvent:questEvent,fillQuests:fillQuests,questDef:questDef,save:save,update:update,render:render,tryMerge:tryMerge,mergeKind:mergeKind,CHIMERA:CHIMERA,CHIMERA_CHANCE:CHIMERA_CHANCE,chimeraKey:chimeraKey,
     makeFish:makeFish,spawnFry:spawnFry,boot:boot,recalcOxygen:recalcOxygen,
     RANK_LEN:RANK_LEN,creatureCanvasSize:creatureCanvasSize,drawCreature:drawCreature,
     SPECIES_ORDER:SPECIES_ORDER,addPearls:addPearls,PEARL_CAP:PEARL_CAP,load:load,FOODS:FOODS};
