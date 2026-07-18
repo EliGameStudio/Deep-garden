@@ -50,7 +50,7 @@
    Phase 1: core loop (swim / feed / grow / breed / merge / evolve)
    ============================================================ */
 
-var VERSION = 'v4.5';
+var VERSION = 'v4.6';
 var W = 960, H = 540;
 var SAVE_KEY = 'deepgarden_save_v1';
 var FLOOR = 476;          // substrate top
@@ -887,6 +887,9 @@ var TIPS = [
   { id:'release', at:null,    text:'DRAG A FISH TO THE GREEN BAR TO SELL IT',
     sub:'YOU GET PEARLS, AND IT STAYS IN YOUR CODEX',
     when:function(){ return G.oxyUse > G.oxyCap*0.8; } },
+  { id:'final',  at:null,     text:'THIS ONE IS A FINAL FORM - IT WONT EVOLVE FURTHER',
+    sub:'ENJOY IT, OR SELL IT ON THE GREEN BAR TO MAKE ROOM',
+    when:function(){ return anyFish(function(f){ return f.age>=1 && f.rank===2 && isFinalForm(f.sp); }); } },
   { id:'museum', at:null,     text:'THE MENU HAS A MUSEUM OF THE WHOLE TREE OF LIFE',
     sub:'EVERY SPECIES, HOW EACH ONE IS MADE',
     when:function(){ return speciesCount()>=8; } },
@@ -2015,6 +2018,14 @@ function recalcOxygen(){
    MERGE — the heart of the game
    ============================================================ */
 /* what would happen if these two met? null = nothing */
+function isFinalForm(id){
+  var sp=SPECIES[id];
+  if(!sp) return false;
+  if(sp.evolveTo && Object.keys(sp.evolveTo).length) return false;   // can still evolve
+  /* a mutant that can still cross into a chimera is not final */
+  if(sp.mutantOf && CHIMERA[chimeraKey(id,id)]) return false;
+  return sp.rank===undefined ? true : true;
+}
 function mergeKind(a,b){
   if(!a||!b||a===b) return null;
   if(a.age<1||b.age<1) return null;
@@ -2024,12 +2035,24 @@ function mergeKind(a,b){
   if(spA.mutantOf && spB.mutantOf && a.rank===2 && b.rank===2)
     return CHIMERA[chimeraKey(a.sp,b.sp)] ? 'chimera' : null;
   if(a.sp!==b.sp) return null;
-  if(a.rank===b.rank) return a.rank<2 ? 'rank' : 'evolve';
+  if(a.rank===b.rank){
+    if(a.rank<2) return 'rank';
+    /* two L3 of the same species: only 'evolve' if there is somewhere to evolve TO.
+       A final form (spire shell, an apex chimera) has an empty evolveTo - merging it
+       used to silently eat one fish for nothing. That is now its own kind: 'apex'. */
+    var branches=spA.evolveTo && Object.keys(spA.evolveTo).length;
+    return branches ? 'evolve' : 'apex';
+  }
   return 'unstable';
 }
 function tryMerge(a,b){
   var kind=mergeKind(a,b);
   if(!kind) return false;
+  if(kind==='apex'){
+    /* the top of a branch. Nothing to gain by merging - so we DON'T, and we say so. */
+    toast('THIS IS A FINAL FORM - IT HAS NOWHERE LEFT TO EVOLVE');
+    return false;
+  }
   var sp=SPECIES[a.sp];
   var x=(a.x+b.x)/2, y=(a.y+b.y)/2;
   var diet=newDiet(), i;
@@ -2105,7 +2128,10 @@ function removeFish(f){
 }
 function sellPrice(f){
   if(!f) return 0;
-  return 4 + f.rank*6 + (SPECIES[f.sp].base?0:6) + ((SPECIES[f.sp].mutantOf||SPECIES[f.sp].chimera)?10:0);
+  var sp=SPECIES[f.sp];
+  var p = 4 + f.rank*6 + (sp.base?0:6) + ((sp.mutantOf||sp.chimera)?10:0);
+  if(f.rank===2 && isFinalForm(f.sp)) p += 12;   // a final form is worth keeping around for
+  return p;
 }
 function releaseFish(f){
   if(!f) return;
@@ -2564,7 +2590,17 @@ function drawFish(c,f,alpha){
   /* ready glyph + the minute ticking away */
   if(f.age>=1 && !f.held && alpha>0.9){
     var topY=Math.round(f.y-RANK_LEN[f.rank]*0.42)-12;
-    if(f.ready && SPR.ready){
+    var isLeaf = isFinalForm(f.sp);
+    if(f.ready && isLeaf){
+      /* a final form: a small calm crown, not the green "ready to merge" chain -
+         merging it leads nowhere and used to just eat one fish */
+      c.globalAlpha=0.7+Math.sin(G.t*3+f.bob)*0.2;
+      var cyy=topY+4;
+      rp(c,Math.round(f.x)-7,cyy+4,14,2,'#c8a44e');
+      for(var cr=0;cr<3;cr++) rp(c,Math.round(f.x)-6+cr*5,cyy,2,4,'#e8cc70');
+      px(c,Math.round(f.x),cyy-1,'#fff0c0');
+      c.globalAlpha=1;
+    } else if(f.ready && SPR.ready){
       var rimg2=SPR.ready;
       var bobY=Math.round(Math.sin(G.t*4+f.bob)*2);
       c.globalAlpha=0.85+Math.sin(G.t*5+f.bob)*0.15;
@@ -2582,7 +2618,16 @@ function drawFish(c,f,alpha){
      green = safe, orange = risky, red = you may lose both. */
   if(G.drag && G.drag!==f){
     var kind=mergeKind(G.drag,f);
-    if(kind){
+    var ly=Math.round(f.y-RANK_LEN[f.rank]*0.78)-16;
+    /* two same-species L3 finals: honest grey "no further", never a green promise */
+    if(!kind && G.drag.sp===f.sp && G.drag.rank===2 && f.rank===2 && isFinalForm(f.sp)){
+      c.globalAlpha=0.5+Math.sin(G.t*5)*0.2;
+      var rr=Math.round(RANK_LEN[f.rank]*0.6);
+      for(var da=0;da<16;da++){ var an=da/16*6.28; if(da%2) continue;
+        px(c,Math.round(f.x+Math.cos(an)*rr),Math.round(f.y+Math.sin(an)*rr),'#9aa4b2'); }
+      c.globalAlpha=1;
+      text(c,'FINAL FORM',f.x,ly,8,'#c8a44e','center');
+    } else if(kind){
       var key = kind==='chimera' ? 'chimera' : (kind==='unstable' ? 'unstable' : 'ok');
       var rimg = SPR.ring[key] ? SPR.ring[key][f.rank] : null;
       if(rimg){
@@ -2590,7 +2635,6 @@ function drawFish(c,f,alpha){
         c.drawImage(rimg,Math.round(f.x-rimg.width/2),Math.round(f.y-rimg.height/2));
         c.globalAlpha=1;
       }
-      var ly=Math.round(f.y-RANK_LEN[f.rank]*0.78)-16;
       if(kind==='chimera')      text(c,'10% OR BOTH DIE',f.x,ly,9,SIGNAL.chimera,'center');
       else if(kind==='unstable')text(c,'25% MUTANT',f.x,ly,8,SIGNAL.unstable,'center');
     }
@@ -3212,6 +3256,7 @@ function drawCodexCard(c){
   else text(c,'NOT DISCOVERED YET',tx,118,8,'#456770');
   text(c,'HOW TO GET IT',tx,H-150,8,'#7fbfc8');
   wrapText(c,codexHint(id),tx,H-126,8,'#ffd400',colW,20);
+  if(known && isFinalForm(id)) text(c,'\u2605 FINAL FORM - THE TOP OF ITS LINE',tx,H-166,7,'#c8a44e');
   panel(c,W/2-80,H-52,160,30,'#175f6d');
   text(c,'BACK',W/2,H-43,10,'#eafffb','center');
   BTN={back:{x:W/2-80,y:H-52,w:160,h:30}};
@@ -3538,7 +3583,7 @@ function boot(){
 }
 /* expose for the headless test harness */
 if(typeof window!=='undefined'){
-  window.__DG={G:G,get BTN(){return BTN;},get confirmBtns(){return G.confirmBtns;},SPECIES:SPECIES,TIPS:TIPS,COSMETICS:COSMETICS,sellPrice:sellPrice,cosmeticDef:cosmeticDef,equipped:equipped,addStars:addStars,BADGES:BADGES,badgeDef:badgeDef,badgeStat:badgeStat,checkBadges:checkBadges,ts:ts,UI_MIN:UI_MIN,codexPages:codexPages,CODEX_PER_PAGE:CODEX_PER_PAGE,codexCell:codexCell,runAway:runAway,AWAY_CAP:AWAY_CAP,sessionStart:sessionStart,sessionEmpty:sessionEmpty,tipTick:tipTick,dismissTip:dismissTip,tipDef:tipDef,SPR:SPR,RIPEN:RIPEN,BIOMES:BIOMES,setBiome:setBiome,biomeDef:biomeDef,bakeScene:bakeScene,AU:AU,audioInit:audioInit,armAudio:armAudio,audioReady:audioReady,unlockSession:unlockSession,audioMute:audioMute,musicTick:musicTick,sfx:sfx,musicStep:musicStep,ACHS:ACHS,LOCKED_BASE:LOCKED_BASE,availableBase:availableBase,newGame:newGame,checkAchs:checkAchs,bumpStat:bumpStat,LB:LB,lbVisible:lbVisible,hasSave:hasSave,fishFrames:fishFrames,fishGlow:fishGlow,SIGNAL:SIGNAL,releaseFish:releaseFish,EVENT_T:EVENT_T,tankFull:tankFull,RANK_O2:RANK_O2,DECOR:DECOR,DECOR_MAX:DECOR_MAX,QUEST_POOL:QUEST_POOL,placeDecor:placeDecor,removeDecor:removeDecor,recalcEnv:recalcEnv,questEvent:questEvent,fillQuests:fillQuests,questDef:questDef,save:save,update:update,render:render,tryMerge:tryMerge,mergeKind:mergeKind,CHIMERA:CHIMERA,CHIMERA_CHANCE:CHIMERA_CHANCE,chimeraKey:chimeraKey,
+  window.__DG={G:G,get BTN(){return BTN;},get confirmBtns(){return G.confirmBtns;},isFinalForm:isFinalForm,SPECIES:SPECIES,TIPS:TIPS,COSMETICS:COSMETICS,sellPrice:sellPrice,cosmeticDef:cosmeticDef,equipped:equipped,addStars:addStars,BADGES:BADGES,badgeDef:badgeDef,badgeStat:badgeStat,checkBadges:checkBadges,ts:ts,UI_MIN:UI_MIN,codexPages:codexPages,CODEX_PER_PAGE:CODEX_PER_PAGE,codexCell:codexCell,runAway:runAway,AWAY_CAP:AWAY_CAP,sessionStart:sessionStart,sessionEmpty:sessionEmpty,tipTick:tipTick,dismissTip:dismissTip,tipDef:tipDef,SPR:SPR,RIPEN:RIPEN,BIOMES:BIOMES,setBiome:setBiome,biomeDef:biomeDef,bakeScene:bakeScene,AU:AU,audioInit:audioInit,armAudio:armAudio,audioReady:audioReady,unlockSession:unlockSession,audioMute:audioMute,musicTick:musicTick,sfx:sfx,musicStep:musicStep,ACHS:ACHS,LOCKED_BASE:LOCKED_BASE,availableBase:availableBase,newGame:newGame,checkAchs:checkAchs,bumpStat:bumpStat,LB:LB,lbVisible:lbVisible,hasSave:hasSave,fishFrames:fishFrames,fishGlow:fishGlow,SIGNAL:SIGNAL,releaseFish:releaseFish,EVENT_T:EVENT_T,tankFull:tankFull,RANK_O2:RANK_O2,DECOR:DECOR,DECOR_MAX:DECOR_MAX,QUEST_POOL:QUEST_POOL,placeDecor:placeDecor,removeDecor:removeDecor,recalcEnv:recalcEnv,questEvent:questEvent,fillQuests:fillQuests,questDef:questDef,save:save,update:update,render:render,tryMerge:tryMerge,mergeKind:mergeKind,CHIMERA:CHIMERA,CHIMERA_CHANCE:CHIMERA_CHANCE,chimeraKey:chimeraKey,
     makeFish:makeFish,spawnFry:spawnFry,boot:boot,recalcOxygen:recalcOxygen,
     RANK_LEN:RANK_LEN,creatureCanvasSize:creatureCanvasSize,drawCreature:drawCreature,
     SPECIES_ORDER:SPECIES_ORDER,addPearls:addPearls,PEARL_CAP:PEARL_CAP,load:load,FOODS:FOODS};
