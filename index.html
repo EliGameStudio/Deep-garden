@@ -50,7 +50,7 @@
    Phase 1: core loop (swim / feed / grow / breed / merge / evolve)
    ============================================================ */
 
-var VERSION = 'v4.3';
+var VERSION = 'v4.4';
 var W = 960, H = 540;
 var SAVE_KEY = 'deepgarden_save_v1';
 var FLOOR = 476;          // substrate top
@@ -1765,7 +1765,7 @@ var G = {
   speed:1, spawnTimer:0,
   feedOpen:false, foodIdx:0,
   buildOpen:false, buildIdx:0, buildTab:'decor', questsOpen:false,
-  drag:null, dragOff:{x:0,y:0}, ptr:{x:0,y:0},
+  drag:null, dragOff:{x:0,y:0}, ptr:{x:0,y:0}, confirmMerge:null,
   event:null,            // {title,sub,id,t}
   codexSel:null, codexPage:0, museumSel:null, museumPage:0, confirmNew:false,
   
@@ -2693,6 +2693,37 @@ function drawUI(c){
     text(c,'TANK FULL - DRAG A FISH DOWN TO SELL IT',W/2,by3+9,6,'#8fffc8','center');
   }
 
+  /* risky-merge confirmation - shown over the tank, blocks nothing behind it */
+  if(G.confirmMerge){
+    var cm=G.confirmMerge, chim=(cm.kind==='chimera');
+    var col=chim?SIGNAL.chimera:SIGNAL.unstable;
+    c.fillStyle='rgba(4,18,26,0.82)'; c.fillRect(0,0,W,H);
+    var dw=560, dx=W/2-dw/2, dy=H/2-150;
+    panel(c,dx,dy,dw,300,'#0d3a48');
+    rp(c,dx,dy,dw,5,col);
+    text(c, chim?'CROSS TWO MUTANTS?':'MISMATCHED MERGE?', W/2, dy+22, 12, col, 'center');
+    /* the two fish, facing each other */
+    var ia=fishFrames(cm.a.sp,cm.a.rank)[0], ib=fishFrames(cm.b.sp,cm.b.rank)[0];
+    var sca=Math.min(90/ia.width,70/ia.height,1.4), scb=Math.min(90/ib.width,70/ib.height,1.4);
+    c.drawImage(ia, Math.round(W/2-120-ia.width*sca/2), dy+60, Math.round(ia.width*sca), Math.round(ia.height*sca));
+    c.save(); c.translate(Math.round(W/2+120), dy+60+Math.round(ib.height*scb/2)); c.scale(-1,1);
+    c.drawImage(ib, Math.round(-ib.width*scb/2), Math.round(-ib.height*scb/2), Math.round(ib.width*scb), Math.round(ib.height*scb));
+    c.restore();
+    text(c,'+',W/2,dy+86,16,'#eafffb','center');
+    if(chim){
+      text(c,'10% CHANCE OF A CHIMERA',W/2,dy+150,9,col,'center');
+      text(c,'90% YOU LOSE BOTH FISH',W/2,dy+172,9,'#ff9aa0','center');
+    } else {
+      text(c,'25% CHANCE OF A MUTANT',W/2,dy+150,9,col,'center');
+      text(c,'75% THEY JUST BECOME ONE ORDINARY FISH',W/2,dy+172,8,'#bfe8f0','center');
+    }
+    panel(c,W/2-230,dy+210,210,52,'#5a2030');
+    text(c,'CANCEL',W/2-125,dy+230,11,'#ffd0d8','center');
+    panel(c,W/2+20,dy+210,210,52, chim?'#7a2030':'#175f6d');
+    text(c, chim?'RISK IT':'DO IT', W/2+125,dy+230,11,'#eafffb','center');
+    G.confirmBtns={ no:{x:W/2-230,y:dy+210,w:210,h:52}, yes:{x:W/2+20,y:dy+210,w:210,h:52} };
+  }
+
   /* the tip card */
   if(G.tip){
     var td=tipDef(G.tip.id);
@@ -3245,6 +3276,16 @@ function onDown(e){
     return;
   }
   if(G.event) return;
+  if(G.confirmMerge){
+    var cb=G.confirmBtns||{};
+    if(cb.yes && hit(cb.yes,p)){
+      var cm2=G.confirmMerge; G.confirmMerge=null;
+      if(G.fish.indexOf(cm2.a)>=0 && G.fish.indexOf(cm2.b)>=0) tryMerge(cm2.a,cm2.b);
+    } else if(cb.no && hit(cb.no,p)){
+      G.confirmMerge=null; sfx('nope');
+    }
+    return;      // any tap while the dialog is up is consumed by it
+  }
   if(dismissTip()) return;
   /* food tray */
   if(G.feedOpen){
@@ -3316,7 +3357,18 @@ function onUp(){
     var dd=Math.hypot(f.x-d.x,f.y-d.y);
     if(dd<bd){ bd=dd; best=f; }
   }
-  if(best && bd<52){ if(!tryMerge(d,best)) toast('THEY MUST BE THE SAME KIND, BOTH ADULT'); }
+  if(best && bd<52){
+    var kind=mergeKind(d,best);
+    /* the two gambles must be confirmed, so a stray drop never spends a fish:
+       unstable = 25% mutant, chimera = 10% and both may dissolve. The safe ladder
+       (rank / evolve) merges straight away as before. */
+    if(kind==='unstable' || kind==='chimera'){
+      d.held=false; best.held=false;
+      G.confirmMerge={ a:d, b:best, kind:kind };
+      return;
+    }
+    if(!tryMerge(d,best)) toast('THEY MUST BE THE SAME KIND, BOTH ADULT');
+  }
 }
 
 /* ============================================================
@@ -3408,7 +3460,7 @@ function boot(){
 }
 /* expose for the headless test harness */
 if(typeof window!=='undefined'){
-  window.__DG={G:G,get BTN(){return BTN;},SPECIES:SPECIES,TIPS:TIPS,COSMETICS:COSMETICS,sellPrice:sellPrice,cosmeticDef:cosmeticDef,equipped:equipped,addStars:addStars,BADGES:BADGES,badgeDef:badgeDef,badgeStat:badgeStat,checkBadges:checkBadges,ts:ts,UI_MIN:UI_MIN,codexPages:codexPages,CODEX_PER_PAGE:CODEX_PER_PAGE,codexCell:codexCell,runAway:runAway,AWAY_CAP:AWAY_CAP,sessionStart:sessionStart,sessionEmpty:sessionEmpty,tipTick:tipTick,dismissTip:dismissTip,tipDef:tipDef,SPR:SPR,RIPEN:RIPEN,BIOMES:BIOMES,setBiome:setBiome,biomeDef:biomeDef,bakeScene:bakeScene,AU:AU,audioInit:audioInit,armAudio:armAudio,audioReady:audioReady,unlockSession:unlockSession,audioMute:audioMute,musicTick:musicTick,sfx:sfx,musicStep:musicStep,ACHS:ACHS,LOCKED_BASE:LOCKED_BASE,availableBase:availableBase,newGame:newGame,checkAchs:checkAchs,bumpStat:bumpStat,LB:LB,lbVisible:lbVisible,hasSave:hasSave,fishFrames:fishFrames,fishGlow:fishGlow,SIGNAL:SIGNAL,releaseFish:releaseFish,EVENT_T:EVENT_T,tankFull:tankFull,RANK_O2:RANK_O2,DECOR:DECOR,DECOR_MAX:DECOR_MAX,QUEST_POOL:QUEST_POOL,placeDecor:placeDecor,removeDecor:removeDecor,recalcEnv:recalcEnv,questEvent:questEvent,fillQuests:fillQuests,questDef:questDef,save:save,update:update,render:render,tryMerge:tryMerge,mergeKind:mergeKind,CHIMERA:CHIMERA,CHIMERA_CHANCE:CHIMERA_CHANCE,chimeraKey:chimeraKey,
+  window.__DG={G:G,get BTN(){return BTN;},get confirmBtns(){return G.confirmBtns;},SPECIES:SPECIES,TIPS:TIPS,COSMETICS:COSMETICS,sellPrice:sellPrice,cosmeticDef:cosmeticDef,equipped:equipped,addStars:addStars,BADGES:BADGES,badgeDef:badgeDef,badgeStat:badgeStat,checkBadges:checkBadges,ts:ts,UI_MIN:UI_MIN,codexPages:codexPages,CODEX_PER_PAGE:CODEX_PER_PAGE,codexCell:codexCell,runAway:runAway,AWAY_CAP:AWAY_CAP,sessionStart:sessionStart,sessionEmpty:sessionEmpty,tipTick:tipTick,dismissTip:dismissTip,tipDef:tipDef,SPR:SPR,RIPEN:RIPEN,BIOMES:BIOMES,setBiome:setBiome,biomeDef:biomeDef,bakeScene:bakeScene,AU:AU,audioInit:audioInit,armAudio:armAudio,audioReady:audioReady,unlockSession:unlockSession,audioMute:audioMute,musicTick:musicTick,sfx:sfx,musicStep:musicStep,ACHS:ACHS,LOCKED_BASE:LOCKED_BASE,availableBase:availableBase,newGame:newGame,checkAchs:checkAchs,bumpStat:bumpStat,LB:LB,lbVisible:lbVisible,hasSave:hasSave,fishFrames:fishFrames,fishGlow:fishGlow,SIGNAL:SIGNAL,releaseFish:releaseFish,EVENT_T:EVENT_T,tankFull:tankFull,RANK_O2:RANK_O2,DECOR:DECOR,DECOR_MAX:DECOR_MAX,QUEST_POOL:QUEST_POOL,placeDecor:placeDecor,removeDecor:removeDecor,recalcEnv:recalcEnv,questEvent:questEvent,fillQuests:fillQuests,questDef:questDef,save:save,update:update,render:render,tryMerge:tryMerge,mergeKind:mergeKind,CHIMERA:CHIMERA,CHIMERA_CHANCE:CHIMERA_CHANCE,chimeraKey:chimeraKey,
     makeFish:makeFish,spawnFry:spawnFry,boot:boot,recalcOxygen:recalcOxygen,
     RANK_LEN:RANK_LEN,creatureCanvasSize:creatureCanvasSize,drawCreature:drawCreature,
     SPECIES_ORDER:SPECIES_ORDER,addPearls:addPearls,PEARL_CAP:PEARL_CAP,load:load,FOODS:FOODS};
