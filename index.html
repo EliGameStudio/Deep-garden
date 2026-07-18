@@ -50,7 +50,7 @@
    Phase 1: core loop (swim / feed / grow / breed / merge / evolve)
    ============================================================ */
 
-var VERSION = 'v4.6';
+var VERSION = 'v4.8';
 var W = 960, H = 540;
 var SAVE_KEY = 'deepgarden_save_v1';
 var FLOOR = 476;          // substrate top
@@ -164,7 +164,7 @@ function makeSprite(w,h,draw){
    - no audio available -> silent fallback, the game never crashes
    ============================================================ */
 var AU = { ctx:null, master:null, delay:null, wet:null, muted:false,
-           nextStep:0, step:0, bpm:58, breathe:0, dead:false };
+           nextStep:0, step:0, bpm:58, breathe:0, dead:false, lastTick:0 };
 
 /* iOS mutes WebAudio when the physical Ring/Silent switch is on - the volume buttons
    do nothing about it. Playing an HTMLAudioElement moves the session to the
@@ -208,14 +208,21 @@ function audioInit(){
     AU.delay.connect(fb); fb.connect(AU.delay);
     AU.delay.connect(AU.wet); AU.wet.connect(AU.master);
     AU.nextStep = AU.ctx.currentTime + 0.1;
-    if(AU.ctx.state==='suspended' && AU.ctx.resume) AU.ctx.resume();
   }catch(e){ AU.ctx=null; AU.dead=true; }
+}
+function tryResume(){
+  if(!AU.ctx || AU.ctx.state==='running') return;
+  try{
+    var pr=AU.ctx.resume();
+    /* the promise tells us if it actually woke; if not, the next gesture tries again */
+    if(pr && pr.then) pr.then(function(){}, function(){});
+  }catch(e){}
 }
 /* Any first gesture counts, not just one on the canvas: the name overlay is a DOM
    button, and some browsers do not deliver pointerdown at all. */
 function armAudio(){
   audioInit();
-  if(AU.ctx && AU.ctx.state==='suspended'){ try{ AU.ctx.resume(); }catch(e){} }
+  tryResume();                                    // retries every gesture until it sticks
   if(AU.el && AU.el.paused){ try{ var p=AU.el.play(); if(p&&p.catch) p.catch(function(){}); }catch(e){} }
 }
 function audioMute(m){
@@ -315,14 +322,20 @@ function musicStep(st,t){
 }
 function musicTick(){
   if(!AU.ctx || AU.muted) return;
+  if(AU.ctx.state!=='running'){ tryResume(); return; }   // wake it, then play next tick
   try{
     var now=AU.ctx.currentTime, spb=60/AU.bpm/2;
+    /* run the scheduler at most ~33x/sec no matter the frame rate (ProMotion is 120) */
+    if(now - AU.lastTick < 0.03) return;
+    AU.lastTick=now;
     if(AU.nextStep < now) AU.nextStep = now + 0.05;
-    while(AU.nextStep < now + 0.3){
+    /* a hard cap so a long stall can never spew a hundred notes at once */
+    var guard=0;
+    while(AU.nextStep < now + 0.2 && guard++ < 16){
       musicStep(AU.step, AU.nextStep);
       AU.step++; AU.nextStep += spb;
     }
-    /* dynamics: the mix breathes over 8 bars, or the loop goes flat */
+    if(AU.nextStep < now) AU.nextStep = now + spb;   // fell far behind: skip ahead, don't catch up
     AU.breathe += 0.016;
     AU.master.gain.setTargetAtTime((AU.muted?0:0.5)*(0.85+Math.sin(AU.breathe*0.06)*0.15), now, 0.4);
   }catch(e){}
@@ -817,17 +830,17 @@ var ACHS = [
    A starter set of water tints and glass frames - more (special decor, skins) next. */
 var COSMETICS = [
   {id:'tint_none',  name:'CLEAR WATER',   kind:'tint',  cost:0,  val:null},
-  {id:'tint_warm',  name:'SUNSET TINT',   kind:'tint',  cost:3,  val:'rgba(255,180,90,0.10)'},
-  {id:'tint_rose',  name:'ROSE TINT',     kind:'tint',  cost:3,  val:'rgba(255,120,180,0.10)'},
-  {id:'tint_deep',  name:'MIDNIGHT TINT', kind:'tint',  cost:4,  val:'rgba(60,90,255,0.12)'},
+  {id:'tint_warm',  name:'SUNSET TINT',   kind:'tint',  cost:2,  val:'rgba(255,180,90,0.10)'},
+  {id:'tint_rose',  name:'ROSE TINT',     kind:'tint',  cost:2,  val:'rgba(255,120,180,0.10)'},
+  {id:'tint_deep',  name:'MIDNIGHT TINT', kind:'tint',  cost:3,  val:'rgba(60,90,255,0.12)'},
   {id:'frame_none', name:'PLAIN GLASS',   kind:'frame', cost:0,  val:null},
-  {id:'frame_gold', name:'GOLD FRAME',    kind:'frame', cost:6,  val:'#c8a44e'},
-  {id:'frame_coral',name:'CORAL FRAME',   kind:'frame', cost:6,  val:'#c85a78'},
-  {id:'frame_jade', name:'JADE FRAME',    kind:'frame', cost:8,  val:'#3fa88a'},
+  {id:'frame_gold', name:'GOLD FRAME',    kind:'frame', cost:4,  val:'#c8a44e'},
+  {id:'frame_coral',name:'CORAL FRAME',   kind:'frame', cost:4,  val:'#c85a78'},
+  {id:'frame_jade', name:'JADE FRAME',    kind:'frame', cost:5,  val:'#3fa88a'},
   {id:'orn_none',   name:'NO ORNAMENT',   kind:'ornament', cost:0,  val:null},
-  {id:'orn_castle', name:'SUNKEN CASTLE', kind:'ornament', cost:8,  val:'castle'},
-  {id:'orn_ship',   name:'OLD SHIPWRECK', kind:'ornament', cost:10, val:'ship'},
-  {id:'orn_arch',   name:'CORAL ARCH',    kind:'ornament', cost:12, val:'arch'}
+  {id:'orn_castle', name:'SUNKEN CASTLE', kind:'ornament', cost:6,  val:'castle'},
+  {id:'orn_ship',   name:'OLD SHIPWRECK', kind:'ornament', cost:7, val:'ship'},
+  {id:'orn_arch',   name:'CORAL ARCH',    kind:'ornament', cost:9, val:'arch'}
 ];
 function cosmeticDef(id){ for(var i=0;i<COSMETICS.length;i++) if(COSMETICS[i].id===id) return COSMETICS[i]; return null; }
 function equipped(kind){
@@ -1980,6 +1993,8 @@ function makeFish(spId,rank,x,y){
 function discover(id){
   if(G.discovered[id]) return false;
   G.discovered[id]=true; addPearls(120);
+  /* a star for each new species - but NOT the four you start with for free */
+  if(BASE_IDS.indexOf(id)<0) addStars(1);
   if(G.sess && G.sess.found.length<8) G.sess.found.push(id);
   sfx('discover');
   checkBadges();
@@ -2999,7 +3014,7 @@ function drawShop(c){
   c.fillStyle='rgba(4,18,26,0.93)'; c.fillRect(0,0,W,H);
   text(c,'STAR SHOP',W/2,16,14,'#8ffff0','center');
   text(c,'\u2605 '+(G.stars||0)+' STARS',W/2,42,9,'#ffe08a','center');
-  text(c,'STARS COME FROM AWARDS - SPEND THEM ON LOOKS, NOT POWER',W/2,60,6,'#7fbfc8','center');
+  text(c,'A STAR FOR EACH NEW SPECIES, MORE FROM AWARDS - SPEND ON LOOKS',W/2,60,6,'#7fbfc8','center');
   BTN={};
   for(var i=0;i<COSMETICS.length;i++){
     var cm=COSMETICS[i], col=i%4, row=Math.floor(i/4);
@@ -3583,7 +3598,7 @@ function boot(){
 }
 /* expose for the headless test harness */
 if(typeof window!=='undefined'){
-  window.__DG={G:G,get BTN(){return BTN;},get confirmBtns(){return G.confirmBtns;},isFinalForm:isFinalForm,SPECIES:SPECIES,TIPS:TIPS,COSMETICS:COSMETICS,sellPrice:sellPrice,cosmeticDef:cosmeticDef,equipped:equipped,addStars:addStars,BADGES:BADGES,badgeDef:badgeDef,badgeStat:badgeStat,checkBadges:checkBadges,ts:ts,UI_MIN:UI_MIN,codexPages:codexPages,CODEX_PER_PAGE:CODEX_PER_PAGE,codexCell:codexCell,runAway:runAway,AWAY_CAP:AWAY_CAP,sessionStart:sessionStart,sessionEmpty:sessionEmpty,tipTick:tipTick,dismissTip:dismissTip,tipDef:tipDef,SPR:SPR,RIPEN:RIPEN,BIOMES:BIOMES,setBiome:setBiome,biomeDef:biomeDef,bakeScene:bakeScene,AU:AU,audioInit:audioInit,armAudio:armAudio,audioReady:audioReady,unlockSession:unlockSession,audioMute:audioMute,musicTick:musicTick,sfx:sfx,musicStep:musicStep,ACHS:ACHS,LOCKED_BASE:LOCKED_BASE,availableBase:availableBase,newGame:newGame,checkAchs:checkAchs,bumpStat:bumpStat,LB:LB,lbVisible:lbVisible,hasSave:hasSave,fishFrames:fishFrames,fishGlow:fishGlow,SIGNAL:SIGNAL,releaseFish:releaseFish,EVENT_T:EVENT_T,tankFull:tankFull,RANK_O2:RANK_O2,DECOR:DECOR,DECOR_MAX:DECOR_MAX,QUEST_POOL:QUEST_POOL,placeDecor:placeDecor,removeDecor:removeDecor,recalcEnv:recalcEnv,questEvent:questEvent,fillQuests:fillQuests,questDef:questDef,save:save,update:update,render:render,tryMerge:tryMerge,mergeKind:mergeKind,CHIMERA:CHIMERA,CHIMERA_CHANCE:CHIMERA_CHANCE,chimeraKey:chimeraKey,
+  window.__DG={G:G,get BTN(){return BTN;},tryResume:tryResume,speciesCount:speciesCount,discover:discover,get confirmBtns(){return G.confirmBtns;},isFinalForm:isFinalForm,SPECIES:SPECIES,TIPS:TIPS,COSMETICS:COSMETICS,sellPrice:sellPrice,cosmeticDef:cosmeticDef,equipped:equipped,addStars:addStars,BADGES:BADGES,badgeDef:badgeDef,badgeStat:badgeStat,checkBadges:checkBadges,ts:ts,UI_MIN:UI_MIN,codexPages:codexPages,CODEX_PER_PAGE:CODEX_PER_PAGE,codexCell:codexCell,runAway:runAway,AWAY_CAP:AWAY_CAP,sessionStart:sessionStart,sessionEmpty:sessionEmpty,tipTick:tipTick,dismissTip:dismissTip,tipDef:tipDef,SPR:SPR,RIPEN:RIPEN,BIOMES:BIOMES,setBiome:setBiome,biomeDef:biomeDef,bakeScene:bakeScene,AU:AU,audioInit:audioInit,armAudio:armAudio,audioReady:audioReady,unlockSession:unlockSession,audioMute:audioMute,musicTick:musicTick,sfx:sfx,musicStep:musicStep,ACHS:ACHS,LOCKED_BASE:LOCKED_BASE,availableBase:availableBase,newGame:newGame,checkAchs:checkAchs,bumpStat:bumpStat,LB:LB,lbVisible:lbVisible,hasSave:hasSave,fishFrames:fishFrames,fishGlow:fishGlow,SIGNAL:SIGNAL,releaseFish:releaseFish,EVENT_T:EVENT_T,tankFull:tankFull,RANK_O2:RANK_O2,DECOR:DECOR,DECOR_MAX:DECOR_MAX,QUEST_POOL:QUEST_POOL,placeDecor:placeDecor,removeDecor:removeDecor,recalcEnv:recalcEnv,questEvent:questEvent,fillQuests:fillQuests,questDef:questDef,save:save,update:update,render:render,tryMerge:tryMerge,mergeKind:mergeKind,CHIMERA:CHIMERA,CHIMERA_CHANCE:CHIMERA_CHANCE,chimeraKey:chimeraKey,
     makeFish:makeFish,spawnFry:spawnFry,boot:boot,recalcOxygen:recalcOxygen,
     RANK_LEN:RANK_LEN,creatureCanvasSize:creatureCanvasSize,drawCreature:drawCreature,
     SPECIES_ORDER:SPECIES_ORDER,addPearls:addPearls,PEARL_CAP:PEARL_CAP,load:load,FOODS:FOODS};
