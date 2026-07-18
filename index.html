@@ -2,12 +2,14 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<meta name="viewport" content="width=device-width,height=device-height,initial-scale=1,maximum-scale=1,viewport-fit=cover,user-scalable=no">
 <meta name="theme-color" content="#04121a">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Deep Garden">
 <meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-touch-fullscreen" content="yes">
+<meta name="format-detection" content="telephone=no">
 <link rel="manifest" href="./manifest.json">
 <link rel="apple-touch-icon" href="./icon-180.png">
 <link rel="icon" type="image/png" href="./icon-180.png">
@@ -16,11 +18,12 @@
 <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
 <style>
   *{margin:0;padding:0;box-sizing:border-box;}
-  html,body{width:100%;height:100%;background:#04121a;overflow:hidden;
+  html,body{width:100%;height:100%;height:100dvh;background:#04121a;overflow:hidden;
+    position:fixed;inset:0;touch-action:none;overscroll-behavior:none;
     -webkit-user-select:none;user-select:none;touch-action:none;
     font-family:'Press Start 2P',ui-monospace,monospace;}
-  #wrap{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;
-    padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);}
+  #wrap{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:#04121a;
+}
   canvas{image-rendering:pixelated;image-rendering:crisp-edges;display:block;touch-action:none;}
   #nameOv{position:fixed;inset:0;background:rgba(4,18,26,.94);display:none;
     align-items:center;justify-content:center;flex-direction:column;gap:18px;z-index:9;padding:24px;}
@@ -47,7 +50,7 @@
    Phase 1: core loop (swim / feed / grow / breed / merge / evolve)
    ============================================================ */
 
-var VERSION = 'v4.0';
+var VERSION = 'v4.3';
 var W = 960, H = 540;
 var SAVE_KEY = 'deepgarden_save_v1';
 var FLOOR = 476;          // substrate top
@@ -808,6 +811,41 @@ var ACHS = [
   {id:'a_merge60',  text:'MERGE 60 TIMES',        stat:'merges',   goal:60, gives:'snail'},
   {id:'a_chimera',  text:'CROSS TWO MUTANTS INTO A CHIMERA', stat:'chimeras', goal:1, gives:'seahorse'}
 ];
+/* Badges: milestones that pay pearls instead of unlocking a species. They live in
+   the menu, out of the tank, and give the late game something to still reach for. */
+/* STAR SHOP: pure cosmetics, bought with stars, never affecting play.
+   A starter set of water tints and glass frames - more (special decor, skins) next. */
+var COSMETICS = [
+  {id:'tint_none',  name:'CLEAR WATER',   kind:'tint',  cost:0,  val:null},
+  {id:'tint_warm',  name:'SUNSET TINT',   kind:'tint',  cost:3,  val:'rgba(255,180,90,0.10)'},
+  {id:'tint_rose',  name:'ROSE TINT',     kind:'tint',  cost:3,  val:'rgba(255,120,180,0.10)'},
+  {id:'tint_deep',  name:'MIDNIGHT TINT', kind:'tint',  cost:4,  val:'rgba(60,90,255,0.12)'},
+  {id:'frame_none', name:'PLAIN GLASS',   kind:'frame', cost:0,  val:null},
+  {id:'frame_gold', name:'GOLD FRAME',    kind:'frame', cost:6,  val:'#c8a44e'},
+  {id:'frame_coral',name:'CORAL FRAME',   kind:'frame', cost:6,  val:'#c85a78'},
+  {id:'frame_jade', name:'JADE FRAME',    kind:'frame', cost:8,  val:'#3fa88a'}
+];
+function cosmeticDef(id){ for(var i=0;i<COSMETICS.length;i++) if(COSMETICS[i].id===id) return COSMETICS[i]; return null; }
+function equipped(kind){
+  var id=G.cosmetic&&G.cosmetic[kind];
+  return cosmeticDef(id) || cosmeticDef(kind==='tint'?'tint_none':'frame_none');
+}
+
+var BADGES = [
+  {id:'b_disc10',  text:'DISCOVER 10 SPECIES',      stat:'discovered', goal:10, reward:150},
+  {id:'b_disc25',  text:'DISCOVER 25 SPECIES',      stat:'discovered', goal:25, reward:400},
+  {id:'b_disc46',  text:'DISCOVER EVERY SPECIES',   stat:'discovered', goal:46, reward:1500},
+  {id:'b_merge150',text:'MERGE 150 TIMES',          stat:'merges',     goal:150, reward:300},
+  {id:'b_evo15',   text:'REACH 15 EVOLVED FORMS',   stat:'evolved',    goal:15, reward:350},
+  {id:'b_chim3',   text:'FORGE 3 CHIMERAS',         stat:'chimeras',   goal:3,  reward:500}
+];
+function badgeDef(id){ for(var i=0;i<BADGES.length;i++) if(BADGES[i].id===id) return BADGES[i]; return null; }
+function addStars(n){ G.stars=Math.max(0,Math.min(9999,(G.stars||0)+n)); }
+function badgeStat(b){
+  if(b.stat==='discovered') return speciesCount();
+  if(b.stat==='evolved'){ var n=0; for(var k in G.discovered){ var sp=SPECIES[k]; if(sp && !sp.base && !sp.mutantOf && !sp.chimera) n++; } return n; }
+  return G.stats[b.stat]||0;
+}
 
 /* ---------- TIPS: the game has to explain itself ----------
    Every lever we built is invisible: that food steers evolution, that a grotto
@@ -842,9 +880,12 @@ var TIPS = [
   { id:'chim',   at:null,     text:'TWO MUTANTS: 10% A CHIMERA, 90% LOSE BOTH',
     sub:'THE RED RING WARNS YOU. THE GAME NEVER DOES IT ITSELF.',
     when:function(){ return (G.stats.mutants||0)>=1; } },
-  { id:'release', at:null,    text:'TANK FULL? DRAG A FISH TO THE GREEN BAR',
-    sub:'IT SWIMS OFF, AND STAYS IN YOUR CODEX',
+  { id:'release', at:null,    text:'DRAG A FISH TO THE GREEN BAR TO SELL IT',
+    sub:'YOU GET PEARLS, AND IT STAYS IN YOUR CODEX',
     when:function(){ return G.oxyUse > G.oxyCap*0.8; } },
+  { id:'museum', at:null,     text:'THE MENU HAS A MUSEUM OF THE WHOLE TREE OF LIFE',
+    sub:'EVERY SPECIES, HOW EACH ONE IS MADE',
+    when:function(){ return speciesCount()>=8; } },
   { id:'codex',  at:'codex',  text:'THE CODEX SHOWS HOW EVERY CREATURE IS MADE',
     sub:'EVEN THE ONES YOU HAVE NEVER SEEN',
     when:function(){ return speciesCount()>=6; } }
@@ -1711,6 +1752,8 @@ var G = {
   discovered:{},         // id -> true
   unlocked:{},           // base species earned through achievements
   achs:{},               // achievement id -> true
+  badges:{},             // milestone badge id -> true
+  owned:{tint_none:true,frame_none:true}, cosmetic:{tint:'tint_none',frame:'frame_none'},
   stats:{merges:0,mutants:0,chimeras:0,released:0,fed:0},
   tips:{}, tip:null, tipGap:0,
   sess:null,             // snapshot taken when the session starts
@@ -1724,7 +1767,8 @@ var G = {
   buildOpen:false, buildIdx:0, buildTab:'decor', questsOpen:false,
   drag:null, dragOff:{x:0,y:0}, ptr:{x:0,y:0},
   event:null,            // {title,sub,id,t}
-  codexSel:null, codexPage:0, confirmNew:false,
+  codexSel:null, codexPage:0, museumSel:null, museumPage:0, confirmNew:false,
+  
   timeScale:1,
   toast:null,
   t:0, frames:0,
@@ -1735,7 +1779,8 @@ var G = {
 function save(){
   try{
     var d={ v:3, name:G.name, pearls:G.pearls, discovered:G.discovered, spawnTimer:G.spawnTimer,
-      unlocked:G.unlocked, achs:G.achs, stats:G.stats, muted:AU.muted?1:0, tips:G.tips,
+      unlocked:G.unlocked, achs:G.achs, badges:G.badges, stats:G.stats, stars:G.stars,
+      owned:G.owned, cosmetic:G.cosmetic, muted:AU.muted?1:0, tips:G.tips,
       savedAt:Date.now(),
       biome:G.biome, biomesOwned:G.biomesOwned,
       decor:G.decor.map(function(x){ return {id:x.id,x:x.x,v:x.v}; }),
@@ -1768,6 +1813,18 @@ function load(){
   G.achs = {};
   if(d.achs && typeof d.achs==='object'){
     for(var k3 in d.achs){ for(var ai=0;ai<ACHS.length;ai++) if(ACHS[ai].id===k3) G.achs[k3]=true; }
+  }
+  G.badges = {};
+  if(d.badges && typeof d.badges==='object'){
+    for(var kb in d.badges) if(badgeDef(kb)) G.badges[kb]=true;
+  }
+  G.stars = num(d.stars,0,0,9999);
+  G.owned = {tint_none:true,frame_none:true};
+  if(d.owned && typeof d.owned==='object'){ for(var ko in d.owned) if(cosmeticDef(ko)) G.owned[ko]=true; }
+  G.cosmetic = {tint:'tint_none',frame:'frame_none'};
+  if(d.cosmetic && typeof d.cosmetic==='object'){
+    if(cosmeticDef(d.cosmetic.tint) && G.owned[d.cosmetic.tint]) G.cosmetic.tint=d.cosmetic.tint;
+    if(cosmeticDef(d.cosmetic.frame) && G.owned[d.cosmetic.frame]) G.cosmetic.frame=d.cosmetic.frame;
   }
   AU.muted = !!d.muted;
   G.tips = {};
@@ -1849,6 +1906,7 @@ function discover(id){
   G.discovered[id]=true; addPearls(120);
   if(G.sess && G.sess.found.length<8) G.sess.found.push(id);
   sfx('discover');
+  checkBadges();
   recalcEnv();                 // a wider codex needs a roomier tank
   questEvent('discover',1);
   return true;
@@ -1972,15 +2030,21 @@ function removeFish(f){
   var i=G.fish.indexOf(f);
   if(i>=0) G.fish.splice(i,1);
 }
+function sellPrice(f){
+  if(!f) return 0;
+  return 4 + f.rank*6 + (SPECIES[f.sp].base?0:6) + ((SPECIES[f.sp].mutantOf||SPECIES[f.sp].chimera)?10:0);
+}
 function releaseFish(f){
   if(!f) return;
+  var gain=sellPrice(f);
+  addPearls(gain);
   removeFish(f);
   burst(f.x,f.y,18,'#bff0ff');
   for(var i=0;i<10;i++) G.bubbles.push({x:f.x+(gameRnd()-0.5)*20,y:f.y,r:1+Math.round(gameRnd()*2),v:40+gameRnd()*30,w:gameRnd()*6.28});
   sfx('release');
   G.stats.released=(G.stats.released||0)+1;
   recalcOxygen(); save();
-  toast('RELEASED - IT STAYS IN YOUR CODEX FOREVER');
+  toast('SOLD FOR '+gain+' PEARLS  -  STILL IN YOUR CODEX');
 }
 function toast(msg){ G.toast={msg:msg,t:2.2}; }
 function rollQuest(exclude){
@@ -2001,6 +2065,7 @@ function checkAchs(){
     if((G.stats[a.stat]||0) < a.goal) continue;
     G.achs[a.id]=true;
     G.unlocked[a.gives]=true;
+    addStars(2);
     var sp=SPECIES[a.gives];
     G.event={ title:'UNLOCKED', sub:sp?sp.name:a.gives, id:a.gives, t:EVENT_T, new:true, ach:true };
     G.timeScale=0.15;
@@ -2009,7 +2074,20 @@ function checkAchs(){
     save();
   }
 }
-function bumpStat(k,n){ G.stats[k]=(G.stats[k]||0)+(n||1); checkAchs(); }
+function bumpStat(k,n){ G.stats[k]=(G.stats[k]||0)+(n||1); checkAchs(); checkBadges(); }
+function checkBadges(){
+  for(var i=0;i<BADGES.length;i++){
+    var b=BADGES[i];
+    if(G.badges[b.id]) continue;
+    if(badgeStat(b) < b.goal) continue;
+    G.badges[b.id]=true;
+    addPearls(b.reward);
+    addStars(b.id==='b_disc46'?5:(b.id==='b_disc25'?3:2));
+    G.event={ title:'BADGE EARNED', sub:b.text+'  +'+b.reward+'  +'+(b.id==='b_disc46'?5:(b.id==='b_disc25'?3:2))+'\u2605', id:null, t:EVENT_T, new:false, badge:true };
+    sfx('ach');
+    save();
+  }
+}
 function questEvent(ev,n){
   n=n||1;
   for(var i=0;i<G.quests.length;i++){
@@ -2079,9 +2157,10 @@ function removeDecor(i){
   var d=decorDef(G.decor[i].id);
   if(!d) return;
   G.decor.splice(i,1);
-  addPearls(Math.round(d.cost*0.5));
-  recalcEnv(); recalcOxygen(); save();
-  toast('REMOVED  +'+Math.round(d.cost*0.5)+' PEARLS');
+  var back=Math.round(d.cost*0.5);
+  addPearls(back);
+  recalcEnv(); recalcOxygen(); sfx('decor'); save();
+  toast('REMOVED '+d.name+'  (+'+back+' PEARLS BACK)');
 }
 function spawnFry(){
   var pool=availableBase();
@@ -2305,12 +2384,15 @@ function drawScene(c){
     if(!dimg) continue;
     c.drawImage(dimg, Math.round(dd.x-dimg.width/2), FLOOR-dimg.height+6);
     if(G.buildOpen && G.buildTab==='decor'){
-      c.globalAlpha=0.55+Math.sin(G.t*6)*0.2;
-      circ(c,dd.x,FLOOR-dimg.height-12,9,'#06202a');
-      rp(c,dd.x-5,FLOOR-dimg.height-13,10,3,'#ff2828');
-      rp(c,dd.x-1,FLOOR-dimg.height-17,3,10,'#ff2828');
-      c.globalAlpha=1;
-    }
+      /* name tag so you can tell what you planted */
+      var def2=decorDef(dd.id);
+      text(c, def2?def2.name.split(' ')[0]:'', dd.x, FLOOR-dimg.height-30, 6, '#bfe8f0', 'center');
+      /* an explicit little bin button - the ONLY way to remove, so nothing goes by accident */
+      var bxx=dd.x, byy=FLOOR-dimg.height-20;
+      circ(c,bxx,byy,10,'#7a2030'); circ(c,bxx,byy,9,'#b83048');
+      rp(c,bxx-4,byy-1,8,2,'#ffe0e8'); rp(c,bxx-1,byy-4,2,8,'#ffe0e8');
+      dd._bin={x:bxx-12,y:byy-12,w:24,h:24};
+    } else { dd._bin=null; }
   }
   /* caustics on floor */
   c.globalCompositeOperation='lighter';
@@ -2368,7 +2450,11 @@ function drawScene(c){
   c.drawImage(SPR.rays,0,0);
   c.globalCompositeOperation='source-over';
   c.drawImage(SPR.front,0,0);
+  var tint=equipped('tint');
+  if(tint.val){ c.fillStyle=tint.val; c.fillRect(0,SURFACE,W,H-SURFACE); }
   c.drawImage(SPR.glass,0,0);
+  var fr=equipped('frame');
+  if(fr.val){ c.fillStyle=fr.val; c.fillRect(0,0,W,4); c.fillRect(0,H-4,W,4); c.fillRect(0,0,4,H); c.fillRect(W-4,0,4,H); }
 }
 function byY(a,b){ return a.y-b.y; }
 function drawFish(c,f,alpha){
@@ -2486,15 +2572,16 @@ function drawUI(c){
   var fw=Math.round(Math.min(1,frac)*ow);
   rp(c,ox,15,fw,12, G.stagnant?'#e0525a':'#3fd0a8');
   text(c,'O2',ox-34,15,9,'#9fe8dc');
-  if(G.stagnant) text(c,'CROWDED - MERGE OR RELEASE SOME FISH',W/2,46,8,'#ffb0b0','center');
+  if(G.stagnant) text(c,'CROWDED - MERGE OR SELL SOME FISH',W/2,46,8,'#ffb0b0','center');
 
-  /* while a fish is in hand the whole button bar turns into one safe drop target */
+  /* a fish in hand: the bar becomes an explicit SELL target with a price on it */
   if(G.drag){
+    var price=sellPrice(G.drag);
     var rp2={x:12,y:H-62,w:W-24,h:46};
     var glow=0.5+Math.sin(G.t*6)*0.3;
     c.globalAlpha=glow; rp(c,rp2.x-6,rp2.y-6,rp2.w+12,rp2.h+12,'#1d5f4a'); c.globalAlpha=1;
     panel(c,rp2.x,rp2.y,rp2.w,rp2.h,'#176d4e');
-    text(c,'DROP HERE TO RELEASE IT',W/2,rp2.y+16,10,'#dfffe8','center');
+    text(c,'DROP HERE TO SELL FOR '+price+' PEARLS',W/2,rp2.y+16,10,'#dfffe8','center');
   
     return;
   }
@@ -2576,24 +2663,7 @@ function drawUI(c){
     }
   }
 
-  /* achievements: the only source of new base species */
-  if(G.questsOpen){
-    var ay=88;
-    panel(c,W-336,ay,320,ACHS.length*34+22,'#0a2a36');
-    text(c,'ACHIEVEMENTS',W-176,ay+6,6,'#7fbfc8','center');
-    for(var ai2=0;ai2<ACHS.length;ai2++){
-      var ac=ACHS[ai2], ayy=ay+20+ai2*34, done=!!G.achs[ac.id];
-      var got=Math.min(ac.goal,G.stats[ac.stat]||0);
-      text(c,ac.text,W-324,ayy,6, done?'#3fd0a8':'#eafffb');
-      var apw=200, apf=Math.round(got/ac.goal*apw);
-      rp(c,W-325,ayy+11,apw+2,8,'#06202a');
-      rp(c,W-324,ayy+12,apf,6, done?'#3fd0a8':'#2f7f8f');
-      text(c,got+'/'+ac.goal,W-112,ayy+12,6,'#9fe8dc');
-      var gsp=SPECIES[ac.gives];
-      text(c, done?('OPEN: '+gsp.name):('LOCKED: '+gsp.name), W-24, ayy+12, 6, done?'#ffd98a':'#5f8b95','right');
-    }
-  }
-  /* quests panel */
+    /* quests panel */
   if(G.questsOpen){
     var qy=H-58-3*40-16;
     panel(c,W/2-210,qy,420,3*40+12,'#0a2a36');
@@ -2615,11 +2685,12 @@ function drawUI(c){
   for(ei=0;ei<AXES.length;ei++) if(G.env[AXES[ei]]>0) envTxt+=(envTxt?'  ':'')+AXES[ei]+' x'+G.env[AXES[ei]];
   if(envTxt) text(c,'TANK LEANS: '+envTxt,W/2,56,7,'rgba(160,230,240,0.65)','center');
 
-  /* the valve has to announce itself - the children never found it */
-  if(!G.drag && !G.tip && G.oxyUse > G.oxyCap*0.92){
-    var pw2=0.4+Math.sin(G.t*4)*0.25;
-    c.globalAlpha=pw2*0.5; rp(c,12,H-62,W-24,46,'#176d4e'); c.globalAlpha=1;
-    text(c,'TANK FULL - DRAG A FISH DOWN HERE TO FREE IT',W/2,H-50,9,'#8fffc8','center');
+  /* a small badge above the bar, not a slab over the whole tank */
+  if(!G.drag && !G.tip && !G.buildOpen && G.oxyUse > G.oxyCap*0.92){
+    var bw3=300, bx3=W/2-bw3/2, by3=H-96;
+    c.globalAlpha=0.6+Math.sin(G.t*4)*0.25;
+    panel(c,bx3,by3,bw3,26,'#176d4e'); c.globalAlpha=1;
+    text(c,'TANK FULL - DRAG A FISH DOWN TO SELL IT',W/2,by3+9,6,'#8fffc8','center');
   }
 
   /* the tip card */
@@ -2738,9 +2809,12 @@ function drawMenu(c){
 
   var bw=300, bx=W/2-bw/2;
   var items=[
-    {k:'cont',  y:170, h:56, label: hasSave()?'CONTINUE':'START', big:true},
-    {k:'newg',  y:242, h:44, label:'NEW GAME'},
-    {k:'board', y:296, h:44, label:'LEADERBOARD'}
+    {k:'cont',  y:140, h:48, label: hasSave()?'CONTINUE':'START', big:true},
+    {k:'newg',  y:200, h:38, label:'NEW GAME'},
+    {k:'museum',y:258, h:38, label:'MUSEUM'},
+    {k:'awards',y:302, h:38, label:'AWARDS'},
+    {k:'shop',  y:346, h:38, label:'STAR SHOP'},
+    {k:'board', y:390, h:38, label:'LEADERBOARD'}
   ];
   BTN={};
   for(var i=0;i<items.length;i++){
@@ -2765,6 +2839,115 @@ function drawMenu(c){
   }
   text(c,VERSION,W-16,H-22,8,'rgba(160,220,230,0.6)','right');
   if(G.name) text(c,G.name.toUpperCase()+'   SPECIES '+speciesCount()+'/'+SPECIES_ORDER.length,16,H-22,8,'rgba(160,220,230,0.6)');
+  text(c,'\u2605 '+(G.stars||0)+' STARS',W-16,H-46,9,'#ffe08a','right');
+}
+function drawShop(c){
+  drawScene(c);
+  c.fillStyle='rgba(4,18,26,0.93)'; c.fillRect(0,0,W,H);
+  text(c,'STAR SHOP',W/2,16,14,'#8ffff0','center');
+  text(c,'\u2605 '+(G.stars||0)+' STARS',W/2,42,9,'#ffe08a','center');
+  text(c,'STARS COME FROM AWARDS - SPEND THEM ON LOOKS, NOT POWER',W/2,60,6,'#7fbfc8','center');
+  BTN={};
+  for(var i=0;i<COSMETICS.length;i++){
+    var cm=COSMETICS[i], col=i%4, row=Math.floor(i/4);
+    var cw=220, ch=120, cx=40+col*(cw+8), cy=82+row*(ch+10);
+    var own=!!G.owned[cm.id], on=(G.cosmetic[cm.kind]===cm.id);
+    panel(c,cx,cy,cw,ch, on?'#175f6d':'#0a2a36');
+    /* a little preview swatch */
+    if(cm.kind==='tint'){
+      rp(c,cx+10,cy+10,cw-20,44,'#0d3a48');
+      if(cm.val){ c.fillStyle=cm.val; c.fillRect(cx+10,cy+10,cw-20,44); }
+      else text(c,'CLEAR',cx+cw/2,cy+28,6,'#7fbfc8','center');
+    } else {
+      rp(c,cx+10,cy+10,cw-20,44,'#0d3a48');
+      if(cm.val){ c.fillStyle=cm.val; c.fillRect(cx+10,cy+10,cw-20,3); c.fillRect(cx+10,cy+51,cw-20,3);
+                  c.fillRect(cx+10,cy+10,3,44); c.fillRect(cx+cw-13,cy+10,3,44); }
+      else text(c,'PLAIN',cx+cw/2,cy+28,6,'#7fbfc8','center');
+    }
+    text(c,cm.name,cx+cw/2,cy+64,6,'#eafffb','center');
+    if(on) text(c,'EQUIPPED',cx+cw/2,cy+92,6,'#3fd0a8','center');
+    else if(own) text(c,'TAP TO WEAR',cx+cw/2,cy+92,6,'#9fe8dc','center');
+    else text(c,'\u2605 '+cm.cost,cx+cw/2,cy+92,7, (G.stars||0)>=cm.cost?'#ffe08a':'#8a7a4a','center');
+    BTN['cos'+i]={x:cx,y:cy,w:cw,h:ch,_i:i};
+  }
+  panel(c,W/2-80,H-40,160,30,'#175f6d'); text(c,'BACK',W/2,H-31,9,'#eafffb','center');
+  BTN.back={x:W/2-80,y:H-40,w:160,h:30};
+}
+function drawAwards(c){
+  drawScene(c);
+  c.fillStyle='rgba(4,18,26,0.92)'; c.fillRect(0,0,W,H);
+  text(c,'AWARDS',W/2,16,14,'#8ffff0','center');
+  text(c,'ACHIEVEMENTS UNLOCK SPECIES.  BADGES PAY PEARLS.',W/2,42,7,'#7fbfc8','center');
+  var y0=64;
+  text(c,'ACHIEVEMENTS',24,y0,8,'#7fbfc8');
+  for(var i=0;i<ACHS.length;i++){
+    var a=ACHS[i], yy=y0+20+i*30, done=!!G.achs[a.id];
+    var got=Math.min(a.goal, G.stats[a.stat]||0);
+    panel(c,20,yy,W/2-30,26, done?'#123f34':'#0a2a36');
+    text(c,a.text,32,yy+9,6, done?'#3fd0a8':'#eafffb');
+    var gsp=SPECIES[a.gives];
+    text(c, done?('UNLOCKED '+gsp.name):(got+'/'+a.goal), W/2-42, yy+9, 6, done?'#ffd98a':'#7fbfc8','right');
+  }
+  text(c,'BADGES',W/2+16,y0,8,'#7fbfc8');
+  for(var j=0;j<BADGES.length;j++){
+    var b=BADGES[j], yb=y0+20+j*30, bd=!!G.badges[b.id];
+    var bg=Math.min(b.goal, badgeStat(b));
+    panel(c,W/2+12,yb,W/2-32,26, bd?'#123f34':'#0a2a36');
+    text(c,b.text,W/2+24,yb+9,6, bd?'#3fd0a8':'#eafffb');
+    text(c, bd?('+'+b.reward+' DONE'):(bg+'/'+b.goal), W-24, yb+9, 6, bd?'#ffd98a':'#7fbfc8','right');
+  }
+  panel(c,W/2-80,H-42,160,32,'#175f6d'); text(c,'BACK',W/2,H-32,10,'#eafffb','center');
+  BTN={ back:{x:W/2-80,y:H-42,w:160,h:32} };
+}
+/* MUSEUM: the whole tree of life, laid out by tier, tappable for the full card */
+function drawMuseum(c){
+  drawScene(c);
+  c.fillStyle='rgba(4,18,26,0.93)'; c.fillRect(0,0,W,H);
+  if(G.museumSel && SPECIES[G.museumSel]){
+    var keep=G.codexSel; G.codexSel=G.museumSel; drawCodexCard(c); G.codexSel=keep;
+    BTN.back={x:W/2-80,y:H-52,w:160,h:30};
+    return;
+  }
+  text(c,'EVOLUTION MUSEUM',W/2,14,13,'#8ffff0','center');
+  text(c,speciesCount()+' OF '+SPECIES_ORDER.length+' DISCOVERED',W/2,38,7,'#7fbfc8','center');
+  /* five columns by tier: base, rank2, rank3/evolved, mutant, chimera */
+  var cols=[
+    {t:'BASE',    ids:SPECIES_ORDER.filter(function(id){ return SPECIES[id].base; })},
+    {t:'EVOLVED', ids:SPECIES_ORDER.filter(function(id){ var s=SPECIES[id]; return !s.base && !s.mutantOf && !s.chimera; })},
+    {t:'MUTANT',  ids:SPECIES_ORDER.filter(function(id){ return SPECIES[id].mutantOf; })},
+    {t:'CHIMERA', ids:SPECIES_ORDER.filter(function(id){ return SPECIES[id].chimera; })}
+  ];
+  var cw=228, x0=16, gap=8, colX=[];
+  for(var ci=0;ci<cols.length;ci++){
+    var cx=x0+ci*(cw+gap);
+    colX.push(cx);
+    text(c,cols[ci].t,cx+cw/2,58,8,'#7fbfc8','center');
+  }
+  BTN={};
+  var per=[8,10,4,14];  // how many fit per column comfortably
+  for(var ci2=0;ci2<cols.length;ci2++){
+    var list=cols[ci2].ids, cx2=colX[ci2];
+    var rows=Math.ceil(list.length/1);
+    var rh=Math.min(30, Math.floor((H-140)/list.length));
+    for(var r=0;r<list.length;r++){
+      var id=list[r], sp=SPECIES[id], known=!!G.discovered[id];
+      var yy=76+r*rh;
+      if(yy+rh>H-46) continue;
+      panel(c,cx2,yy,cw,rh-3, known?'#0a2a36':'#08202a');
+      var img=fishFrames(id, sp.chimera||sp.mutantOf?2:1)[0];
+      var isc=Math.min((rh-6)/img.height, 26/img.width, 1);
+      var iw=Math.max(2,Math.round(img.width*isc)), ih=Math.max(2,Math.round(img.height*isc));
+      if(known) c.drawImage(img,cx2+4,yy+Math.round((rh-3-ih)/2),iw,ih);
+      else { c.save(); c.drawImage(img,cx2+4,yy+Math.round((rh-3-ih)/2),iw,ih);
+             c.globalCompositeOperation='source-atop'; c.fillStyle='#12313d';
+             c.fillRect(cx2+4,yy,iw,rh); c.restore(); }
+      var nm=known ? (sp.name.length>15?sp.name.slice(0,14)+'.':sp.name) : '???';
+      text(c,nm,cx2+34,yy+Math.round(rh/2)-4,6, speciesTint(sp,known));
+      BTN['m_'+id]={x:cx2,y:yy,w:cw,h:rh-3, _id:id};
+    }
+  }
+  panel(c,W/2-80,H-40,160,30,'#175f6d'); text(c,'BACK',W/2,H-31,9,'#eafffb','center');
+  BTN.back={x:W/2-80,y:H-40,w:160,h:30};
 }
 function drawSummary(c){
   drawScene(c);
@@ -2883,13 +3066,17 @@ function codexHint(id){
   }
   return 'UNKNOWN';
 }
-function wrapText(c,str,x,y,size,col,perLine,lineH){
+/* wrap on real width (monospace: one em per char at the LIFTED size), so the text
+   never spills past the panel however the font scale changes */
+function wrapText(c,str,x,y,size,col,maxW,lineH){
+  var em=ts(size), perLine=Math.max(6,Math.floor(maxW/em));
   var words=str.split(' '), line='', n=0;
   for(var i=0;i<words.length;i++){
-    if((line+words[i]).length>perLine){ text(c,line,x,y+n*lineH,size,col); n++; line=''; }
-    line+=words[i]+' ';
+    var w=words[i];
+    if(line && (line.length+1+w.length)>perLine){ text(c,line,x,y+n*lineH,size,col); n++; line=w; }
+    else line = line ? line+' '+w : w;
   }
-  if(line.trim()) text(c,line,x,y+n*lineH,size,col);
+  if(line) text(c,line,x,y+n*lineH,size,col);
   return n+1;
 }
 function speciesTint(sp,known){
@@ -2902,20 +3089,20 @@ function drawCodexCard(c){
   var id=G.codexSel, sp=SPECIES[id], known=!!G.discovered[id];
   panel(c,70,44,W-140,H-104,'#0a2a36');
   var img=fishFrames(id,2)[Math.floor(G.t*8)%FRAMES];
-  var sc=Math.min(280/img.width,210/img.height,2);
+  var sc=Math.min(230/img.width,190/img.height,2);
   var iw=Math.round(img.width*sc), ih=Math.round(img.height*sc);
-  var ix=Math.round(110+(280-iw)/2), iy=Math.round(70+(210-ih)/2);
+  var ix=Math.round(96+(230-iw)/2), iy=Math.round(80+(190-ih)/2);
   if(known) c.drawImage(img,ix,iy,iw,ih);
   else { c.save(); c.drawImage(img,ix,iy,iw,ih); c.globalCompositeOperation='source-atop';
          c.fillStyle='#12313d'; c.fillRect(ix,iy,iw,ih); c.restore(); }
-  var tx=420;
-  text(c,known?sp.name:'? ? ?',tx,72,14,speciesTint(sp,known));
-  var tag = sp.rare ? sp.rare : (sp.mutantOf ? 'MUTANT' : (sp.base ? (sp.locked?'BASE SPECIES - EARNED':'BASE SPECIES') : 'EVOLVED'));
-  text(c,tag,tx,98,8,'#7fbfc8');
-  if(known) wrapText(c,sp.desc,tx,126,8,'#bfe8f0',42,14);
-  else text(c,'NOT DISCOVERED YET',tx,126,8,'#456770');
-  text(c,'HOW TO GET IT',tx,H-142,8,'#7fbfc8');
-  wrapText(c,codexHint(id),tx,H-124,8,'#ffd400',46,13);
+  var tx=376, rightEdge=W-84, colW=rightEdge-tx;
+  text(c,known?sp.name:'? ? ?',tx,66,12,speciesTint(sp,known));
+  var tag = sp.rare ? sp.rare : (sp.mutantOf ? 'MUTANT' : (sp.base ? (sp.locked?'EARNED':'BASE') : 'EVOLVED'));
+  text(c,tag,tx,92,8,'#7fbfc8');
+  if(known) wrapText(c,sp.desc,tx,118,8,'#bfe8f0',colW,20);
+  else text(c,'NOT DISCOVERED YET',tx,118,8,'#456770');
+  text(c,'HOW TO GET IT',tx,H-150,8,'#7fbfc8');
+  wrapText(c,codexHint(id),tx,H-126,8,'#ffd400',colW,20);
   panel(c,W/2-80,H-52,160,30,'#175f6d');
   text(c,'BACK',W/2,H-43,10,'#eafffb','center');
   BTN={back:{x:W/2-80,y:H-52,w:160,h:30}};
@@ -2953,6 +3140,9 @@ function render(){
   c.clearRect(0,0,W,H);
   if(G.scene==='menu'){ drawMenu(c); return; }
   if(G.scene==='summary'){ drawSummary(c); return; }
+  if(G.scene==='awards'){ drawAwards(c); return; }
+  if(G.scene==='shop'){ drawShop(c); return; }
+  if(G.scene==='museum'){ drawMuseum(c); return; }
   if(G.scene==='board'){ drawBoard(c); return; }
   if(G.scene==='codex'){ drawCodex(c); return; }
   drawScene(c);
@@ -2966,8 +3156,11 @@ function render(){
    ============================================================ */
 var view={sx:1,ox:0,oy:0};
 function resize(){
-  var pad=0;
-  var aw=window.innerWidth-pad, ah=window.innerHeight-pad;
+  /* the visual viewport is the true drawable area in a standalone iPad app;
+     window.inner* can lag or include a strip that is not really there */
+  var vv=window.visualViewport;
+  var aw=(vv&&vv.width)||window.innerWidth||W;
+  var ah=(vv&&vv.height)||window.innerHeight||H;
   var s=Math.min(aw/W,ah/H);
   var dpr=Math.min(2,window.devicePixelRatio||1);
   cv.style.width=Math.round(W*s)+'px'; cv.style.height=Math.round(H*s)+'px';
@@ -3002,11 +3195,35 @@ function onDown(e){
     }
     if(hit(BTN.cont,p)){ G.scene='tank'; sessionStart(); save(); }
     else if(hit(BTN.newg,p)) G.confirmNew=true;
+    else if(hit(BTN.museum,p)){ G.scene='museum'; G.museumSel=null; G.museumPage=0; }
+    else if(hit(BTN.awards,p)) G.scene='awards';
+    else if(hit(BTN.shop,p)) G.scene='shop';
     else if(hit(BTN.board,p)){ G.scene='board'; lbSubmit(); lbFetch(); }
     return;
   }
   if(G.scene==='summary'){
     if(hit(BTN.sumOk,p)){ G.scene='menu'; sessionStart(); save(); }
+    return;
+  }
+  if(G.scene==='awards'){ if(hit(BTN.back,p)) G.scene='menu'; return; }
+  if(G.scene==='shop'){
+    if(hit(BTN.back,p)){ G.scene='menu'; return; }
+    for(var sk in BTN){
+      if(sk.indexOf('cos')!==0 || !hit(BTN[sk],p)) continue;
+      var cm=COSMETICS[BTN[sk]._i];
+      if(!G.owned[cm.id]){
+        if((G.stars||0)<cm.cost){ toast('NOT ENOUGH STARS'); sfx('nope'); return; }
+        addStars(-cm.cost); G.owned[cm.id]=true; sfx('quest');
+      }
+      G.cosmetic[cm.kind]=cm.id; save();
+      return;
+    }
+    return;
+  }
+  if(G.scene==='museum'){
+    if(G.museumSel){ if(hit(BTN.back,p)) G.museumSel=null; return; }
+    if(hit(BTN.back,p)){ G.scene='menu'; return; }
+    for(var mk in BTN){ if(mk.indexOf('m_')===0 && hit(BTN[mk],p) && G.discovered[BTN[mk]._id]){ G.museumSel=BTN[mk]._id; return; } }
     return;
   }
   if(G.scene==='board'){
@@ -3065,9 +3282,14 @@ function onDown(e){
   if(hit(BTN.codex,p)){ G.scene='codex'; G.codexSel=null; G.codexPage=0; return; }
   if(p.y>H-68 || p.y<44) return;
   if(G.buildOpen && G.buildTab==='decor'){
-    var ex=decorAt(p.x);
-    if(ex>=0) removeDecor(ex);
-    else placeDecor(p.x);
+    /* the bin buttons come first - they are the only way to remove anything */
+    for(var rb=0;rb<G.decor.length;rb++){
+      var bb=G.decor[rb]._bin;
+      if(bb && hit(bb,p)){ removeDecor(rb); return; }
+    }
+    /* tapping an occupied spot does NOTHING now - no more accidental removals */
+    if(decorAt(p.x)>=0){ toast('THAT SPOT IS TAKEN - TAP THE RED BIN TO REMOVE'); return; }
+    placeDecor(p.x);
     return;
   }
   G.feedOpen=false; G.questsOpen=false;
@@ -3101,7 +3323,8 @@ function onUp(){
    BOOT + LOOP
    ============================================================ */
 function newGame(){
-  G.pearls=60; G.discovered={}; G.unlocked={}; G.achs={};
+  G.pearls=60; G.stars=0; G.discovered={}; G.unlocked={}; G.achs={}; G.badges={};
+  G.owned={tint_none:true,frame_none:true}; G.cosmetic={tint:'tint_none',frame:'frame_none'};
   G.stats={merges:0,mutants:0,chimeras:0,released:0,fed:0};
   G.tips={}; G.tip=null; G.tipGap=0;
   G.fish=[]; G.decor=[]; G.quests=[]; G.pellets=[]; G.parts=[]; G.bubbles=[];
@@ -3150,6 +3373,11 @@ function boot(){
   if(LB_URL) lbFetch();
   resize();
   window.addEventListener('resize',resize);
+  window.addEventListener('orientationchange',function(){ setTimeout(resize,60); setTimeout(resize,300); });
+  if(window.visualViewport){ window.visualViewport.addEventListener('resize',resize); }
+  /* iPad reports the real size a beat late when the app first opens or returns */
+  document.addEventListener('visibilitychange',function(){ if(!document.hidden) setTimeout(resize,60); });
+  setTimeout(resize,100); setTimeout(resize,500);
   cv.addEventListener('pointerdown',onDown);
   cv.addEventListener('pointermove',onMove);
   cv.addEventListener('pointerup',onUp);
@@ -3180,7 +3408,7 @@ function boot(){
 }
 /* expose for the headless test harness */
 if(typeof window!=='undefined'){
-  window.__DG={G:G,SPECIES:SPECIES,TIPS:TIPS,ts:ts,UI_MIN:UI_MIN,codexPages:codexPages,CODEX_PER_PAGE:CODEX_PER_PAGE,codexCell:codexCell,runAway:runAway,AWAY_CAP:AWAY_CAP,sessionStart:sessionStart,sessionEmpty:sessionEmpty,tipTick:tipTick,dismissTip:dismissTip,tipDef:tipDef,SPR:SPR,RIPEN:RIPEN,BIOMES:BIOMES,setBiome:setBiome,biomeDef:biomeDef,bakeScene:bakeScene,AU:AU,audioInit:audioInit,armAudio:armAudio,audioReady:audioReady,unlockSession:unlockSession,audioMute:audioMute,musicTick:musicTick,sfx:sfx,musicStep:musicStep,ACHS:ACHS,LOCKED_BASE:LOCKED_BASE,availableBase:availableBase,newGame:newGame,checkAchs:checkAchs,bumpStat:bumpStat,LB:LB,lbVisible:lbVisible,hasSave:hasSave,fishFrames:fishFrames,fishGlow:fishGlow,SIGNAL:SIGNAL,releaseFish:releaseFish,EVENT_T:EVENT_T,tankFull:tankFull,RANK_O2:RANK_O2,DECOR:DECOR,DECOR_MAX:DECOR_MAX,QUEST_POOL:QUEST_POOL,placeDecor:placeDecor,removeDecor:removeDecor,recalcEnv:recalcEnv,questEvent:questEvent,fillQuests:fillQuests,questDef:questDef,save:save,update:update,render:render,tryMerge:tryMerge,mergeKind:mergeKind,CHIMERA:CHIMERA,CHIMERA_CHANCE:CHIMERA_CHANCE,chimeraKey:chimeraKey,
+  window.__DG={G:G,get BTN(){return BTN;},SPECIES:SPECIES,TIPS:TIPS,COSMETICS:COSMETICS,sellPrice:sellPrice,cosmeticDef:cosmeticDef,equipped:equipped,addStars:addStars,BADGES:BADGES,badgeDef:badgeDef,badgeStat:badgeStat,checkBadges:checkBadges,ts:ts,UI_MIN:UI_MIN,codexPages:codexPages,CODEX_PER_PAGE:CODEX_PER_PAGE,codexCell:codexCell,runAway:runAway,AWAY_CAP:AWAY_CAP,sessionStart:sessionStart,sessionEmpty:sessionEmpty,tipTick:tipTick,dismissTip:dismissTip,tipDef:tipDef,SPR:SPR,RIPEN:RIPEN,BIOMES:BIOMES,setBiome:setBiome,biomeDef:biomeDef,bakeScene:bakeScene,AU:AU,audioInit:audioInit,armAudio:armAudio,audioReady:audioReady,unlockSession:unlockSession,audioMute:audioMute,musicTick:musicTick,sfx:sfx,musicStep:musicStep,ACHS:ACHS,LOCKED_BASE:LOCKED_BASE,availableBase:availableBase,newGame:newGame,checkAchs:checkAchs,bumpStat:bumpStat,LB:LB,lbVisible:lbVisible,hasSave:hasSave,fishFrames:fishFrames,fishGlow:fishGlow,SIGNAL:SIGNAL,releaseFish:releaseFish,EVENT_T:EVENT_T,tankFull:tankFull,RANK_O2:RANK_O2,DECOR:DECOR,DECOR_MAX:DECOR_MAX,QUEST_POOL:QUEST_POOL,placeDecor:placeDecor,removeDecor:removeDecor,recalcEnv:recalcEnv,questEvent:questEvent,fillQuests:fillQuests,questDef:questDef,save:save,update:update,render:render,tryMerge:tryMerge,mergeKind:mergeKind,CHIMERA:CHIMERA,CHIMERA_CHANCE:CHIMERA_CHANCE,chimeraKey:chimeraKey,
     makeFish:makeFish,spawnFry:spawnFry,boot:boot,recalcOxygen:recalcOxygen,
     RANK_LEN:RANK_LEN,creatureCanvasSize:creatureCanvasSize,drawCreature:drawCreature,
     SPECIES_ORDER:SPECIES_ORDER,addPearls:addPearls,PEARL_CAP:PEARL_CAP,load:load,FOODS:FOODS};
