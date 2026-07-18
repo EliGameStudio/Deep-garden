@@ -2,7 +2,7 @@
    Two rules that cost us dearly elsewhere and are not negotiable here:
    1. index.html is NETWORK-FIRST, or an update never reaches the phone.
    2. Other origins (Firebase!) are never touched, or the leaderboard freezes. */
-var CACHE = 'deepgarden-v4-8';
+var CACHE = 'deepgarden-v4-9';
 var SHELL = ['./', './index.html', './manifest.json', './icon-180.png', './icon-512.png'];
 
 self.addEventListener('install', function (e) {

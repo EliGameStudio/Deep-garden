@@ -50,7 +50,7 @@
    Phase 1: core loop (swim / feed / grow / breed / merge / evolve)
    ============================================================ */
 
-var VERSION = 'v4.8';
+var VERSION = 'v4.9';
 var W = 960, H = 540;
 var SAVE_KEY = 'deepgarden_save_v1';
 var FLOOR = 476;          // substrate top
@@ -190,6 +190,44 @@ function unlockSession(){
   }catch(e){}
 }
 function audioReady(){ return !!(AU.ctx && AU.ctx.state==='running'); }
+/* A real report from THIS device - so we stop guessing which link is broken. */
+function audioReport(){
+  var r=[];
+  var C = window.AudioContext || window.webkitAudioContext;
+  r.push(['WebAudio API', C ? 'present' : 'MISSING']);
+  r.push(['prefixed', (window.AudioContext?'std':(window.webkitAudioContext?'webkit-only':'none'))]);
+  r.push(['context', AU.ctx ? 'created' : 'not created']);
+  r.push(['state', AU.ctx ? AU.ctx.state : '-']);
+  r.push(['dead flag', AU.dead ? 'YES' : 'no']);
+  r.push(['muted', AU.muted ? 'YES' : 'no']);
+  r.push(['master gain', AU.master ? (''+AU.master.gain.value.toFixed(2)) : '-']);
+  r.push(['unlock el', AU.el ? (AU.el.paused?'made, paused':'made, playing') : 'not made']);
+  var lat = AU.ctx && AU.ctx.baseLatency!==undefined ? AU.ctx.baseLatency : null;
+  r.push(['baseLatency', lat===null?'-':lat.toFixed(3)]);
+  r.push(['sampleRate', AU.ctx ? (''+AU.ctx.sampleRate) : '-']);
+  r.push(['destination', AU.ctx&&AU.ctx.destination ? (''+ (AU.ctx.destination.maxChannelCount||'?') +'ch') : '-']);
+  r.push(['notes sent', ''+(AU._notes||0)]);
+  var vv=window.visualViewport;
+  r.push(['standalone', (window.navigator&&window.navigator.standalone)?'home-screen app':'browser tab']);
+  return r;
+}
+/* a loud, unmissable test tone - a second of a clear sine, bypassing music/mute */
+function audioTest(){
+  armAudio();
+  if(!AU.ctx){ toast('NO AUDIO CONTEXT ON THIS DEVICE'); return; }
+  tryResume();
+  try{
+    var t=AU.ctx.currentTime;
+    var g=AU.ctx.createGain(); g.connect(AU.ctx.destination);
+    g.gain.setValueAtTime(0.0001,t);
+    g.gain.exponentialRampToValueAtTime(0.5,t+0.05);   // deliberately loud
+    g.gain.exponentialRampToValueAtTime(0.0001,t+1.0);
+    var o=AU.ctx.createOscillator(); o.type='sine'; o.frequency.value=440;
+    o.connect(g); o.start(t); o.stop(t+1.05);
+    G.audioTestAt=Date.now();
+    toast('PLAYING A TEST TONE - state: '+AU.ctx.state);
+  }catch(e){ toast('TEST TONE FAILED: '+e.message); }
+}
 function audioInit(){
   if(AU.ctx || AU.dead) return;
   try{
@@ -251,7 +289,7 @@ function voice(freq,t,dur,o){
     g.gain.setValueAtTime(0.0001,t);
     g.gain.exponentialRampToValueAtTime(pk,t+att);
     g.gain.exponentialRampToValueAtTime(0.0001,t+dur+rel);
-    a.start(t); b.start(t);                       // start BEFORE stop, always
+    a.start(t); b.start(t); AU._notes=(AU._notes||0)+1;   // start BEFORE stop, always
     a.stop(t+dur+rel+0.05); b.stop(t+dur+rel+0.05);
   }catch(e){}
 }
@@ -1855,7 +1893,7 @@ var G = {
   buildOpen:false, buildIdx:0, buildTab:'decor', questsOpen:false,
   drag:null, dragOff:{x:0,y:0}, ptr:{x:0,y:0}, confirmMerge:null,
   event:null,            // {title,sub,id,t}
-  codexSel:null, codexPage:0, museumSel:null, museumPage:0, confirmNew:false,
+  codexSel:null, codexPage:0, museumSel:null, museumPage:0, confirmNew:false, audioPanel:false,
   
   timeScale:1,
   toast:null,
@@ -2701,6 +2739,7 @@ function drawUI(c){
   if(AU.muted){ rp(c,mx+2,14,1,12,'#ff8fb0'); rp(c,mx+3,15,1,10,'#ff8fb0'); }
   else { rp(c,mx+3,17,1,4,'#7fe9d0'); rp(c,mx+5,15,1,8,'#7fe9d0'); }
   if(!AU.muted && !audioReady()) text(c,'TAP FOR SOUND',mx-24,15,7,'#ffd400','right');
+  else if(!AU.muted) text(c,'2x = SOUND HELP',mx-24,15,5,'rgba(160,220,230,0.4)','right');
 
   /* oxygen bar */
   var ow=150, ox=W-ow-60;
@@ -3008,6 +3047,28 @@ function drawMenu(c){
   text(c,VERSION,W-16,H-22,8,'rgba(160,220,230,0.6)','right');
   if(G.name) text(c,G.name.toUpperCase()+'   SPECIES '+speciesCount()+'/'+SPECIES_ORDER.length,16,H-22,8,'rgba(160,220,230,0.6)');
   text(c,'\u2605 '+(G.stars||0)+' STARS',W-16,H-46,9,'#ffe08a','right');
+}
+function drawAudioPanel(c){
+  c.fillStyle='rgba(4,18,26,0.94)'; c.fillRect(0,0,W,H);
+  text(c,'SOUND CHECK',W/2,18,13,'#8ffff0','center');
+  text(c,'THIS IS FROM YOUR DEVICE - READ IT OFF TO ME',W/2,42,6,'#7fbfc8','center');
+  var rep=audioReport();
+  var x0=W/2-230, y0=64;
+  for(var i=0;i<rep.length;i++){
+    var col=i%2, xx=x0+col*240, yy=y0+Math.floor(i/2)*26;
+    text(c,rep[i][0],xx,yy,6,'#8fb8c0');
+    var bad=/MISSING|not created|suspended|YES|not made/.test(rep[i][1]) && rep[i][0]!=='muted';
+    text(c,rep[i][1],xx+150,yy,6, bad?'#ff8f8f':'#9fe8dc','right');
+  }
+  var by=y0+Math.ceil(rep.length/2)*26+16;
+  panel(c,W/2-230,by,220,46,'#175f6d'); text(c,'PLAY TEST TONE',W/2-120,by+18,8,'#eafffb','center');
+  panel(c,W/2+10,by,220,46, AU.muted?'#7a2030':'#0e3a47'); text(c, AU.muted?'UNMUTE':'MUTED: NO',W/2+120,by+18,8,'#eafffb','center');
+  text(c,'IF THE TONE IS SILENT: CHECK THE RING/SILENT SWITCH ON THE',W/2,by+62,6,'#bfe8f0','center');
+  text(c,'SIDE OF THE PHONE, AND TURN THE VOLUME UP WITH THE BUTTONS',W/2,by+76,6,'#bfe8f0','center');
+  panel(c,W/2-80,H-44,160,32,'#0e3a47'); text(c,'CLOSE',W/2,H-34,9,'#eafffb','center');
+  BTN.audioTest={x:W/2-230,y:by,w:220,h:46};
+  BTN.audioMuteBtn={x:W/2+10,y:by,w:220,h:46};
+  BTN.audioClose={x:W/2-80,y:H-44,w:160,h:32};
 }
 function drawShop(c){
   drawScene(c);
@@ -3318,6 +3379,7 @@ function render(){
   drawUI(c);
   drawEvent(c);
   drawAway(c);
+  if(G.audioPanel) drawAudioPanel(c);
 }
 
 /* ============================================================
@@ -3413,6 +3475,12 @@ function onDown(e){
     }
     return;
   }
+  if(G.audioPanel){
+    if(hit(BTN.audioTest,p)) audioTest();
+    else if(hit(BTN.audioMuteBtn,p)) audioMute(!AU.muted);
+    else if(hit(BTN.audioClose,p)) G.audioPanel=false;
+    return;
+  }
   if(G.event) return;
   if(G.confirmMerge){
     var cb=G.confirmBtns||{};
@@ -3446,7 +3514,13 @@ function onDown(e){
     }
   }
   if(G.away){ if(hit(BTN.awayOk,p) || true){ G.away=null; } return; }
-  if(hit(BTN.mute,p)){ audioMute(!AU.muted); return; }
+  if(hit(BTN.mute,p)){
+    var nowT=Date.now();
+    if(G._lastMuteTap && nowT-G._lastMuteTap<400){ G.audioPanel=true; G._lastMuteTap=0; return; }
+    G._lastMuteTap=nowT;
+    audioMute(!AU.muted);
+    return;
+  }
   if(hit(BTN.menu,p)){ G.scene = sessionEmpty() ? 'menu' : 'summary'; G.feedOpen=G.buildOpen=G.questsOpen=false; save(); lbSubmit(); return; }
   if(hit(BTN.feed,p)){ G.feedOpen=!G.feedOpen; G.buildOpen=false; G.questsOpen=false; return; }
   if(hit(BTN.build,p)){ G.buildOpen=!G.buildOpen; G.feedOpen=false; G.questsOpen=false; return; }
@@ -3598,7 +3672,7 @@ function boot(){
 }
 /* expose for the headless test harness */
 if(typeof window!=='undefined'){
-  window.__DG={G:G,get BTN(){return BTN;},tryResume:tryResume,speciesCount:speciesCount,discover:discover,get confirmBtns(){return G.confirmBtns;},isFinalForm:isFinalForm,SPECIES:SPECIES,TIPS:TIPS,COSMETICS:COSMETICS,sellPrice:sellPrice,cosmeticDef:cosmeticDef,equipped:equipped,addStars:addStars,BADGES:BADGES,badgeDef:badgeDef,badgeStat:badgeStat,checkBadges:checkBadges,ts:ts,UI_MIN:UI_MIN,codexPages:codexPages,CODEX_PER_PAGE:CODEX_PER_PAGE,codexCell:codexCell,runAway:runAway,AWAY_CAP:AWAY_CAP,sessionStart:sessionStart,sessionEmpty:sessionEmpty,tipTick:tipTick,dismissTip:dismissTip,tipDef:tipDef,SPR:SPR,RIPEN:RIPEN,BIOMES:BIOMES,setBiome:setBiome,biomeDef:biomeDef,bakeScene:bakeScene,AU:AU,audioInit:audioInit,armAudio:armAudio,audioReady:audioReady,unlockSession:unlockSession,audioMute:audioMute,musicTick:musicTick,sfx:sfx,musicStep:musicStep,ACHS:ACHS,LOCKED_BASE:LOCKED_BASE,availableBase:availableBase,newGame:newGame,checkAchs:checkAchs,bumpStat:bumpStat,LB:LB,lbVisible:lbVisible,hasSave:hasSave,fishFrames:fishFrames,fishGlow:fishGlow,SIGNAL:SIGNAL,releaseFish:releaseFish,EVENT_T:EVENT_T,tankFull:tankFull,RANK_O2:RANK_O2,DECOR:DECOR,DECOR_MAX:DECOR_MAX,QUEST_POOL:QUEST_POOL,placeDecor:placeDecor,removeDecor:removeDecor,recalcEnv:recalcEnv,questEvent:questEvent,fillQuests:fillQuests,questDef:questDef,save:save,update:update,render:render,tryMerge:tryMerge,mergeKind:mergeKind,CHIMERA:CHIMERA,CHIMERA_CHANCE:CHIMERA_CHANCE,chimeraKey:chimeraKey,
+  window.__DG={G:G,get BTN(){return BTN;},tryResume:tryResume,audioReport:audioReport,audioTest:audioTest,speciesCount:speciesCount,discover:discover,get confirmBtns(){return G.confirmBtns;},isFinalForm:isFinalForm,SPECIES:SPECIES,TIPS:TIPS,COSMETICS:COSMETICS,sellPrice:sellPrice,cosmeticDef:cosmeticDef,equipped:equipped,addStars:addStars,BADGES:BADGES,badgeDef:badgeDef,badgeStat:badgeStat,checkBadges:checkBadges,ts:ts,UI_MIN:UI_MIN,codexPages:codexPages,CODEX_PER_PAGE:CODEX_PER_PAGE,codexCell:codexCell,runAway:runAway,AWAY_CAP:AWAY_CAP,sessionStart:sessionStart,sessionEmpty:sessionEmpty,tipTick:tipTick,dismissTip:dismissTip,tipDef:tipDef,SPR:SPR,RIPEN:RIPEN,BIOMES:BIOMES,setBiome:setBiome,biomeDef:biomeDef,bakeScene:bakeScene,AU:AU,audioInit:audioInit,armAudio:armAudio,audioReady:audioReady,unlockSession:unlockSession,audioMute:audioMute,musicTick:musicTick,sfx:sfx,musicStep:musicStep,ACHS:ACHS,LOCKED_BASE:LOCKED_BASE,availableBase:availableBase,newGame:newGame,checkAchs:checkAchs,bumpStat:bumpStat,LB:LB,lbVisible:lbVisible,hasSave:hasSave,fishFrames:fishFrames,fishGlow:fishGlow,SIGNAL:SIGNAL,releaseFish:releaseFish,EVENT_T:EVENT_T,tankFull:tankFull,RANK_O2:RANK_O2,DECOR:DECOR,DECOR_MAX:DECOR_MAX,QUEST_POOL:QUEST_POOL,placeDecor:placeDecor,removeDecor:removeDecor,recalcEnv:recalcEnv,questEvent:questEvent,fillQuests:fillQuests,questDef:questDef,save:save,update:update,render:render,tryMerge:tryMerge,mergeKind:mergeKind,CHIMERA:CHIMERA,CHIMERA_CHANCE:CHIMERA_CHANCE,chimeraKey:chimeraKey,
     makeFish:makeFish,spawnFry:spawnFry,boot:boot,recalcOxygen:recalcOxygen,
     RANK_LEN:RANK_LEN,creatureCanvasSize:creatureCanvasSize,drawCreature:drawCreature,
     SPECIES_ORDER:SPECIES_ORDER,addPearls:addPearls,PEARL_CAP:PEARL_CAP,load:load,FOODS:FOODS};
