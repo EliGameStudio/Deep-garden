@@ -50,7 +50,7 @@
    Phase 1: core loop (swim / feed / grow / breed / merge / evolve)
    ============================================================ */
 
-var VERSION = 'v5.4';
+var VERSION = 'v5.5';
 var W = 960, H = 540;
 var SAVE_KEY = 'deepgarden_save_v1';
 var FLOOR = 476;          // substrate top
@@ -965,6 +965,9 @@ var TIPS = [
   { id:'mutant', at:null,     text:'DRAG DIFFERENT RANKS TOGETHER ON PURPOSE',
     sub:'25% YOU GET A MUTANT. YELLOW RING = THAT CHANCE.',
     when:function(){ return (G.stats.merges||0)>=4 && anyFish(function(f){ return f.rank>0; }); } },
+  { id:'mutantnext', at:null,  text:'YOU MADE A MUTANT. TWO OF THEM AT L3 CAN CROSS',
+    sub:'GROW TWO MUTANTS TO L3, DRAG THEM TOGETHER',
+    when:function(){ return (G.stats.mutants||0)>=1; } },
   { id:'chim',   at:null,     text:'TWO MUTANTS: 30% A CHIMERA, ELSE THEY RESET',
     sub:'YOU NO LONGER LOSE THEM - THEY FALL BACK TO RANK 1',
     when:function(){ return (G.stats.mutants||0)>=1; } },
@@ -1943,7 +1946,7 @@ var G = {
   oxyCap:150, oxyUse:0, stagnant:false,
   speed:1, spawnTimer:0,
   feedOpen:false, foodIdx:0,
-  buildOpen:false, buildIdx:0, buildTab:'decor', questsOpen:false,
+  buildOpen:false, buildIdx:0, buildTab:'decor', questsOpen:false, placing:null,
   drag:null, dragOff:{x:0,y:0}, ptr:{x:0,y:0}, ptrIn:false, confirmMerge:null,
   event:null,            // {title,sub,id,t}
   codexSel:null, codexPage:0, museumSel:null, museumPage:0, confirmNew:false, audioPanel:false, shopTab:'tint',
@@ -2352,7 +2355,7 @@ function decorAt(x){
   return -1;
 }
 function placeDecor(x){
-  var d=DECOR[G.buildIdx];
+  var d=G.placing ? decorDef(G.placing) : DECOR[G.buildIdx];
   if(!d) return;
   if(G.decor.length>=DECOR_MAX){ toast('NO ROOM LEFT ON THE FLOOR'); return; }
   if(G.pearls<d.cost){ toast('NOT ENOUGH PEARLS'); sfx('nope'); return; }
@@ -2626,21 +2629,25 @@ function drawScene(c){
   for(var b=0;b<near.length;b++) drawFish(c,near[b],1);
 
   /* a ghost of what you are about to plant, exactly where it will stand */
-  if(G.buildOpen && G.buildTab==='decor' && G.ptrIn && G.ptr.x>40 && G.ptr.y>44 && G.ptr.y<H-62-90){
-    var gd=DECOR[G.buildIdx];
+  /* a translucent piece stuck to the finger, shown ONLY while actively placing.
+     No more stray dashed line at the left edge - the ghost simply does not exist
+     unless you are holding something. */
+  if(G.placing){
+    var gd=decorDef(G.placing);
     var gimg=gd && SPR.decor[gd.id] ? SPR.decor[gd.id][0] : null;
     if(gimg){
-      var gx2=Math.max(40,Math.min(W-40,G.ptr.x));
+      var gx2=Math.max(40,Math.min(W-40, G.ptrIn?G.ptr.x:W/2));
       var blocked = decorAt(gx2)>=0 || G.pearls<gd.cost || G.decor.length>=DECOR_MAX;
-      c.globalAlpha=0.75;
-      for(var gy=FLOOR-gimg.height+6;gy<FLOOR+4;gy+=8) rp(c,gx2,gy,1,4, blocked?'#ff2828':'#00ff5a');
-      c.globalAlpha=blocked?0.30:0.62;
+      /* a soft footprint where it will land */
+      c.globalAlpha=0.5;
+      circ(c,gx2,FLOOR+2,10, blocked?'#ff2828':'#00ff5a');
+      c.globalAlpha=blocked?0.35:0.7;
       c.drawImage(gimg, Math.round(gx2-gimg.width/2), FLOOR-gimg.height+6);
       c.globalAlpha=1;
       var lbl = G.pearls<gd.cost ? 'NOT ENOUGH PEARLS'
               : (G.decor.length>=DECOR_MAX ? 'NO ROOM LEFT'
-              : (decorAt(gx2)>=0 ? 'SOMETHING IS ALREADY HERE' : gd.name+'  -'+gd.cost));
-      text(c,lbl,gx2,FLOOR-gimg.height-12,6, blocked?'#ff2828':'#00ff5a','center');
+              : (decorAt(gx2)>=0 ? 'TAKEN - TAP ELSEWHERE' : 'TAP TO PLACE  -  '+gd.name));
+      text(c,lbl,gx2,FLOOR-gimg.height-14,7, blocked?'#ff2828':'#00ff5a','center');
     }
   }
 
@@ -2864,6 +2871,8 @@ function drawUI(c){
      and you tapped blind. */
   if(G.buildOpen){
     var sy=H-62-86, sh2=82;
+    /* while placing, the tray goes translucent so you can see where it lands */
+    c.globalAlpha = G.placing ? 0.35 : 1;
     panel(c,10,sy,W-20,sh2,'#0a2a36');
     var tabs=[['decor','DECOR'],['tank','TANK']];
     for(var ti=0;ti<2;ti++){
@@ -2887,9 +2896,12 @@ function drawUI(c){
         text(c,''+d.cost,slot.x+slot.w-6,slot.y+6,5, G.pearls>=d.cost?'#ffd98a':'#8a5a5a','right');
         BTN['slot'+bi]=slot;
       }
-      /* what you picked, spelled out - the slot is too small to say it all */
+      /* the slot of the piece in hand glows; otherwise show what is selected */
+      for(var hi=0;hi<DECOR.length;hi++){
+        if(G.placing===DECOR[hi].id && BTN['slot'+hi]){ var hb=BTN['slot'+hi]; rp(c,hb.x,hb.y,hb.w,2,'#00ff5a'); }
+      }
       var pk=DECOR[G.buildIdx];
-      if(pk) text(c, pk.name+'  -  PULLS '+pk.axis+(pk.o2?'  -  +'+pk.o2+' OXYGEN':'')+'  -  '+pk.cost+' PEARLS',
+      if(pk && !G.placing) text(c, 'TAP A PIECE TO PICK IT UP  -  '+pk.name+'  '+pk.cost+' PEARLS',
                   W/2,sy-18,7,'#ffd98a','center');
     } else {
       for(var vi=0;vi<BIOMES.length;vi++){
@@ -2907,6 +2919,8 @@ function drawUI(c){
       }
       text(c,'EACH TANK PULLS EVOLUTION ITS OWN WAY',W/2,sy-18,7,'#7fbfc8','center');
     }
+    c.globalAlpha=1;
+    if(G.placing) text(c,'TAP THE TANK FLOOR TO PLACE  -  TAP THE PIECE AGAIN TO CANCEL',W/2,sy-34,7,'#00ff5a','center');
   }
 
     /* quests panel */
@@ -2930,6 +2944,20 @@ function drawUI(c){
   var envTxt='', ei;
   for(ei=0;ei<AXES.length;ei++) if(G.env[AXES[ei]]>0) envTxt+=(envTxt?'  ':'')+AXES[ei]+' x'+G.env[AXES[ei]];
   if(envTxt) text(c,'TANK LEANS: '+envTxt,W/2,56,7,'rgba(160,230,240,0.65)','center');
+
+  /* while a fish is held: its name and rank, big, across the top of the tank */
+  if(G.drag){
+    var hs=SPECIES[G.drag.sp];
+    var hname = hs ? hs.name : '?';
+    var hrank = 'L'+(G.drag.rank+1);
+    var htint = speciesTint(hs, true);
+    panel(c, W/2-190, 48, 380, 34, 'rgba(6,26,34,0.82)');
+    text(c, hname, W/2-8, 57, 11, htint, 'right');
+    text(c, hrank, W/2+12, 57, 11, '#ffe08a', 'left');
+    if(isFinalForm(G.drag.sp)) text(c,'\u2605 FINAL FORM', W/2, 72, 6, '#c8a44e','center');
+    else if(hs && hs.chimera) text(c,'CHIMERA', W/2, 72, 6, SIGNAL.chimera,'center');
+    else if(hs && hs.mutantOf) text(c,'MUTANT', W/2, 72, 6, SIGNAL.unstable,'center');
+  }
 
   /* a small badge above the bar, not a slab over the whole tank */
   if(!G.drag && !G.tip && !G.buildOpen && G.oxyUse > G.oxyCap*0.92){
@@ -3422,10 +3450,10 @@ function codexHint(id){
   if(sp.chimera){
     for(k in CHIMERA) if(CHIMERA[k]===id){
       var pr=k.split('+');
-      return nameOf(pr[0])+' L3  +  '+nameOf(pr[1])+' L3   (10%)';
+      return 'CROSS '+nameOf(pr[0])+' + '+nameOf(pr[1])+', BOTH MUTANTS AT L3   (30%)';
     }
   }
-  if(sp.mutantOf) return 'MISMATCHED RANKS OF '+nameOf(sp.mutantOf)+'   (25%)';
+  if(sp.mutantOf) return 'MERGE MISMATCHED RANKS OF '+nameOf(sp.mutantOf)+'   (25% CHANCE)';
   for(k in SPECIES){
     var par=SPECIES[k];
     for(var ax in par.evolveTo){
@@ -3472,6 +3500,11 @@ function drawCodexCard(c){
   text(c,'HOW TO GET IT',tx,H-150,8,'#7fbfc8');
   wrapText(c,codexHint(id),tx,H-126,8,'#ffd400',colW,20);
   if(known && isFinalForm(id)) text(c,'\u2605 FINAL FORM - THE TOP OF ITS LINE',tx,H-166,7,'#c8a44e');
+  /* chimeras need the whole recipe spelled out - it is the deepest, least obvious path */
+  if(SPECIES[id].chimera){
+    wrapText(c,'STEP 1: MAKE TWO MUTANTS (MERGE MISMATCHED RANKS, 25%). STEP 2: GROW EACH TO L3. STEP 3: DRAG ONE ONTO THE OTHER - 30% A CHIMERA, ELSE THEY RESET.',
+             tx,H-96,7,'#9fe8dc',colW,17);
+  }
   panel(c,W/2-80,H-52,160,30,'#175f6d');
   text(c,'BACK',W/2,H-43,10,'#eafffb','center');
   BTN={back:{x:W/2-80,y:H-52,w:160,h:30}};
@@ -3651,15 +3684,22 @@ function onDown(e){
     }
   }
   if(G.buildOpen){
-    if(hit(BTN.tab0,p)){ G.buildTab='decor'; return; }
-    if(hit(BTN.tab1,p)){ G.buildTab='tank'; return; }
+    if(hit(BTN.tab0,p)){ G.buildTab='decor'; G.placing=null; return; }
+    if(hit(BTN.tab1,p)){ G.buildTab='tank'; G.placing=null; return; }
     if(G.buildTab==='tank'){
       for(var vj=0;vj<BIOMES.length;vj++){
         if(hit(BTN['bio'+vj],p)){ if(BIOMES[vj].id!==G.biome) setBiome(BIOMES[vj].id); return; }
       }
     } else {
       for(var bj=0;bj<DECOR.length;bj++){
-        if(hit(BTN['slot'+bj],p)){ G.buildIdx=bj; return; }
+        if(hit(BTN['slot'+bj],p)){
+          var picked=DECOR[bj];
+          if(G.placing===picked.id){ G.placing=null; }           // tap again = put it back
+          else if(G.pearls<picked.cost){ toast('NOT ENOUGH PEARLS'); sfx('nope'); }
+          else if(G.decor.length>=DECOR_MAX){ toast('NO ROOM - REMOVE SOMETHING FIRST'); sfx('nope'); }
+          else { G.placing=picked.id; G.buildIdx=bj; sfx('decor'); }
+          return;
+        }
       }
     }
   }
@@ -3671,10 +3711,10 @@ function onDown(e){
     audioMute(!AU.muted);
     return;
   }
-  if(hit(BTN.menu,p)){ G.scene = sessionEmpty() ? 'menu' : 'summary'; G.feedOpen=G.buildOpen=G.questsOpen=false; G.audioPanel=false; save(); lbSubmit(); return; }
+  if(hit(BTN.menu,p)){ G.scene = sessionEmpty() ? 'menu' : 'summary'; G.feedOpen=G.buildOpen=G.questsOpen=false; G.audioPanel=false; G.placing=null; save(); lbSubmit(); return; }
   if(BTN.rename && hit(BTN.rename,p)){ askName(); return; }
   if(hit(BTN.feed,p)){ G.feedOpen=!G.feedOpen; G.buildOpen=false; G.questsOpen=false; return; }
-  if(hit(BTN.build,p)){ G.buildOpen=!G.buildOpen; G.feedOpen=false; G.questsOpen=false; G.ptrIn=false; return; }
+  if(hit(BTN.build,p)){ G.buildOpen=!G.buildOpen; G.feedOpen=false; G.questsOpen=false; G.ptrIn=false; G.placing=null; return; }
   if(hit(BTN.quests,p)){ G.questsOpen=!G.questsOpen; G.feedOpen=false; G.buildOpen=false; return; }
   if(hit(BTN.life,p)){
     if(tankFull()) toast('TANK IS FULL - MERGE SOME FISH FIRST');
@@ -3691,9 +3731,15 @@ function onDown(e){
       var bb=G.decor[rb]._bin;
       if(bb && hit(bb,p)){ removeDecor(rb); return; }
     }
-    /* tapping an occupied spot does NOTHING now - no more accidental removals */
-    if(decorAt(p.x)>=0){ toast('THAT SPOT IS TAKEN - TAP THE RED BIN TO REMOVE'); return; }
-    placeDecor(p.x);
+    /* only places if you are holding a piece; a taken spot is refused clearly */
+    if(G.placing){
+      if(decorAt(p.x)>=0){ toast('TAKEN - TAP AN EMPTY SPOT'); sfx('nope'); return; }
+      placeDecor(p.x);
+      G.placing=null;
+      return;
+    }
+    if(decorAt(p.x)>=0){ toast('TAP THE RED BIN TO REMOVE'); return; }
+    toast('PICK A PIECE FROM THE TRAY FIRST');
     return;
   }
   G.feedOpen=false; G.questsOpen=false;
