@@ -50,7 +50,7 @@
    Phase 1: core loop (swim / feed / grow / breed / merge / evolve)
    ============================================================ */
 
-var VERSION = 'v4.9';
+var VERSION = 'v5.3';
 var W = 960, H = 540;
 var SAVE_KEY = 'deepgarden_save_v1';
 var FLOOR = 476;          // substrate top
@@ -748,7 +748,7 @@ var SPECIES_ORDER = ['guppy','lantern','mossback','prismfry','tetra','dart','gho
                      'seahorse','weedhorse','crownhorse','boneseahorse',
                      'kingprawn','cathedral','sunjelly','dragonhorse'];
 /* mutant x mutant -> chimera. Key is the two ids sorted, so order never matters. */
-var CHIMERA_CHANCE = 0.10;
+var CHIMERA_CHANCE = 0.30;   // was 0.10 - the wall to collecting 14 chimeras
 var CHIMERA = {
   'prismfry+prismfry':       'prismbloom',
   'glassdart+glassdart':     'glassseer',
@@ -878,7 +878,14 @@ var COSMETICS = [
   {id:'orn_none',   name:'NO ORNAMENT',   kind:'ornament', cost:0,  val:null},
   {id:'orn_castle', name:'SUNKEN CASTLE', kind:'ornament', cost:6,  val:'castle'},
   {id:'orn_ship',   name:'OLD SHIPWRECK', kind:'ornament', cost:7, val:'ship'},
-  {id:'orn_arch',   name:'CORAL ARCH',    kind:'ornament', cost:9, val:'arch'}
+  {id:'orn_arch',   name:'CORAL ARCH',    kind:'ornament', cost:9, val:'arch'},
+  {id:'skin_none',  name:'CLASSIC TANK',  kind:'skin', cost:0,  val:null},
+  {id:'skin_driftwood', name:'DRIFTWOOD',  kind:'skin', cost:6,
+     val:{frame:'#3a2a18',edge:'#6e5230',glass:'#5a4a30',substrate:'#4a3a22'}},
+  {id:'skin_slate', name:'BLACK SLATE',   kind:'skin', cost:8,
+     val:{frame:'#141820',edge:'#39424e',glass:'#2a3038',substrate:'#20262e'}},
+  {id:'skin_pearl', name:'PEARL & GOLD',  kind:'skin', cost:12,
+     val:{frame:'#4a3a1a',edge:'#c8a44e',glass:'#8a7440',substrate:'#6e5a2e'}}
 ];
 function cosmeticDef(id){ for(var i=0;i<COSMETICS.length;i++) if(COSMETICS[i].id===id) return COSMETICS[i]; return null; }
 function equipped(kind){
@@ -886,19 +893,45 @@ function equipped(kind){
   return cosmeticDef(id) || cosmeticDef(kind==='tint'?'tint_none':'frame_none');
 }
 
+/* Once the collection is complete, pearls have nowhere to go and growing another
+   fish to sell is pointless. The Patron board fixes that: fund museum plaques with
+   pearls. Each plaque is a lasting mark, and the last one is the true 100% ending. */
+var PATRON = [
+  {id:'p_bronze', name:'BRONZE PLAQUE', cost:2000,  col:'#b87333'},
+  {id:'p_silver', name:'SILVER PLAQUE', cost:6000,  col:'#c0c8d0'},
+  {id:'p_gold',   name:'GOLD PLAQUE',   cost:15000, col:'#e0c060'},
+  {id:'p_pearl',  name:'PEARL CROWN',   cost:40000, col:'#f0e8ff'}
+];
+function patronDef(id){ for(var i=0;i<PATRON.length;i++) if(PATRON[i].id===id) return PATRON[i]; return null; }
+function patronDone(){ for(var i=0;i<PATRON.length;i++) if(!G.patron[i.id]&&!G.patron[PATRON[i].id]) return false; return true; }
+function collectionComplete(){ return speciesCount()>=SPECIES_ORDER.length; }
+
 var BADGES = [
   {id:'b_disc10',  text:'DISCOVER 10 SPECIES',      stat:'discovered', goal:10, reward:150},
   {id:'b_disc25',  text:'DISCOVER 25 SPECIES',      stat:'discovered', goal:25, reward:400},
   {id:'b_disc46',  text:'DISCOVER EVERY SPECIES',   stat:'discovered', goal:46, reward:1500},
   {id:'b_merge150',text:'MERGE 150 TIMES',          stat:'merges',     goal:150, reward:300},
   {id:'b_evo15',   text:'REACH 15 EVOLVED FORMS',   stat:'evolved',    goal:15, reward:350},
-  {id:'b_chim3',   text:'FORGE 3 CHIMERAS',         stat:'chimeras',   goal:3,  reward:500}
+  {id:'b_chim3',   text:'FORGE 3 CHIMERAS',         stat:'chimeras',   goal:3,  reward:500},
+  {id:'b_chimall', text:'DISCOVER ALL 14 CHIMERAS', stat:'chimeraSpecies', goal:14, reward:2000},
+  {id:'b_patron',  text:'FUND EVERY MUSEUM PLAQUE', stat:'plaques',    goal:4,  reward:3000}
 ];
 function badgeDef(id){ for(var i=0;i<BADGES.length;i++) if(BADGES[i].id===id) return BADGES[i]; return null; }
 function addStars(n){ G.stars=Math.max(0,Math.min(9999,(G.stars||0)+n)); }
+function fundPlaque(id){
+  var d=patronDef(id); if(!d || G.patron[id]) return false;
+  if(G.pearls<d.cost){ toast('NEED '+d.cost+' PEARLS'); sfx('nope'); return false; }
+  addPearls(-d.cost); G.patron[id]=true;
+  addStars(3);
+  G.event={ title:d.name+' UNVEILED', sub:'THE MUSEUM REMEMBERS YOUR NAME', id:null, t:EVENT_T, new:false };
+  sfx('ach'); checkBadges(); save();
+  return true;
+}
 function badgeStat(b){
   if(b.stat==='discovered') return speciesCount();
   if(b.stat==='evolved'){ var n=0; for(var k in G.discovered){ var sp=SPECIES[k]; if(sp && !sp.base && !sp.mutantOf && !sp.chimera) n++; } return n; }
+  if(b.stat==='chimeraSpecies'){ var cc=0; for(var k2 in G.discovered){ if(SPECIES[k2] && SPECIES[k2].chimera) cc++; } return cc; }
+  if(b.stat==='plaques'){ var pc=0; for(var pi=0;pi<PATRON.length;pi++) if(G.patron[PATRON[pi].id]) pc++; return pc; }
   return G.stats[b.stat]||0;
 }
 
@@ -932,8 +965,8 @@ var TIPS = [
   { id:'mutant', at:null,     text:'DRAG DIFFERENT RANKS TOGETHER ON PURPOSE',
     sub:'25% YOU GET A MUTANT. YELLOW RING = THAT CHANCE.',
     when:function(){ return (G.stats.merges||0)>=4 && anyFish(function(f){ return f.rank>0; }); } },
-  { id:'chim',   at:null,     text:'TWO MUTANTS: 10% A CHIMERA, 90% LOSE BOTH',
-    sub:'THE RED RING WARNS YOU. THE GAME NEVER DOES IT ITSELF.',
+  { id:'chim',   at:null,     text:'TWO MUTANTS: 30% A CHIMERA, ELSE THEY RESET',
+    sub:'YOU NO LONGER LOSE THEM - THEY FALL BACK TO RANK 1',
     when:function(){ return (G.stats.mutants||0)>=1; } },
   { id:'release', at:null,    text:'DRAG A FISH TO THE GREEN BAR TO SELL IT',
     sub:'YOU GET PEARLS, AND IT STAYS IN YOUR CODEX',
@@ -1841,9 +1874,14 @@ function bakeOrnaments(){
     })(k);
   }
 }
+var _glassFills=null;
 function bakeGlass(){
+  var sk=equipped('skin').val;
+  _glassFills=[];
   SPR.glass = makeSprite(W,H,function(c){
-    var F='#0a1a22', F2='#20505e';
+    var _origFill=Object.getOwnPropertyDescriptor(c,'fillStyle');
+
+    var F = sk ? sk.frame : '#0a1a22', F2 = sk ? sk.edge : '#20505e';
     rp(c,0,0,W,SURFACE-8,'#061018');
     rp(c,0,SURFACE-9,W,2,F2);
     rp(c,0,0,8,H,F); rp(c,W-8,0,8,H,F);
@@ -1860,6 +1898,20 @@ function bakeGlass(){
         c.fillStyle='rgba(200,255,255,0.025)';
         c.fillRect(x+Math.round(y*0.12),y,6,1);
       }
+    }
+    if(sk){
+      _glassFills.push(sk.frame, sk.edge, sk.substrate);
+      /* a substrate band just inside the bottom frame - dithered, never a flat fill */
+      var rnd=mulberry32(0x5C1B), band=biomeDef(G.biome), sub=sk.substrate;
+      for(var yb=0;yb<10;yb++){
+        for(var xb=8;xb<W-8;xb+=2){
+          var jit=(rnd()-0.5)*0.3;
+          c.fillStyle = (yb/10 + jit) < 0.5 ? sub : F;
+          c.fillRect(xb,H-18+yb,2,1);
+        }
+      }
+    } else {
+      _glassFills.push('#0a1a22','#20505e');
     }
   });
 }
@@ -1879,7 +1931,8 @@ var G = {
   unlocked:{},           // base species earned through achievements
   achs:{},               // achievement id -> true
   badges:{},             // milestone badge id -> true
-  owned:{tint_none:true,frame_none:true,orn_none:true}, cosmetic:{tint:'tint_none',frame:'frame_none',ornament:'orn_none'},
+  patron:{},             // funded museum plaques
+  owned:{tint_none:true,frame_none:true,orn_none:true,skin_none:true}, cosmetic:{tint:'tint_none',frame:'frame_none',ornament:'orn_none',skin:'skin_none'},
   stats:{merges:0,mutants:0,chimeras:0,released:0,fed:0},
   tips:{}, tip:null, tipGap:0,
   sess:null,             // snapshot taken when the session starts
@@ -1893,7 +1946,7 @@ var G = {
   buildOpen:false, buildIdx:0, buildTab:'decor', questsOpen:false,
   drag:null, dragOff:{x:0,y:0}, ptr:{x:0,y:0}, confirmMerge:null,
   event:null,            // {title,sub,id,t}
-  codexSel:null, codexPage:0, museumSel:null, museumPage:0, confirmNew:false, audioPanel:false,
+  codexSel:null, codexPage:0, museumSel:null, museumPage:0, confirmNew:false, audioPanel:false, shopTab:'tint',
   
   timeScale:1,
   toast:null,
@@ -1905,7 +1958,7 @@ var G = {
 function save(){
   try{
     var d={ v:3, name:G.name, pearls:G.pearls, discovered:G.discovered, spawnTimer:G.spawnTimer,
-      unlocked:G.unlocked, achs:G.achs, badges:G.badges, stats:G.stats, stars:G.stars,
+      unlocked:G.unlocked, achs:G.achs, badges:G.badges, patron:G.patron, stats:G.stats, stars:G.stars,
       owned:G.owned, cosmetic:G.cosmetic, muted:AU.muted?1:0, tips:G.tips,
       savedAt:Date.now(),
       biome:G.biome, biomesOwned:G.biomesOwned,
@@ -1945,13 +1998,16 @@ function load(){
     for(var kb in d.badges) if(badgeDef(kb)) G.badges[kb]=true;
   }
   G.stars = num(d.stars,0,0,9999);
-  G.owned = {tint_none:true,frame_none:true,orn_none:true};
+  G.patron = {};
+  if(d.patron && typeof d.patron==='object'){ for(var kp in d.patron) if(patronDef(kp)) G.patron[kp]=true; }
+  G.owned = {tint_none:true,frame_none:true,orn_none:true,skin_none:true};
   if(d.owned && typeof d.owned==='object'){ for(var ko in d.owned) if(cosmeticDef(ko)) G.owned[ko]=true; }
-  G.cosmetic = {tint:'tint_none',frame:'frame_none',ornament:'orn_none'};
+  G.cosmetic = {tint:'tint_none',frame:'frame_none',ornament:'orn_none',skin:'skin_none'};
   if(d.cosmetic && typeof d.cosmetic==='object'){
     if(cosmeticDef(d.cosmetic.tint) && G.owned[d.cosmetic.tint]) G.cosmetic.tint=d.cosmetic.tint;
     if(cosmeticDef(d.cosmetic.frame) && G.owned[d.cosmetic.frame]) G.cosmetic.frame=d.cosmetic.frame;
     if(cosmeticDef(d.cosmetic.ornament) && G.owned[d.cosmetic.ornament]) G.cosmetic.ornament=d.cosmetic.ornament;
+    if(cosmeticDef(d.cosmetic.skin) && G.owned[d.cosmetic.skin]) G.cosmetic.skin=d.cosmetic.skin;
   }
   AU.muted = !!d.muted;
   G.tips = {};
@@ -2122,12 +2178,17 @@ function tryMerge(a,b){
       coins=200; isNew=discover(target);
       title='CHIMERA!'; sub=SPECIES[target].name;
     } else {
-      /* 90%: the cross collapses and takes both parents with it */
+      /* the cross fails - but the fish are NOT lost. They fall back to L1 of their
+         own kind. You lose the growth, not the animals. 90% total loss was a
+         punishment, not a risk, and it walled off 13 of the 14 chimeras. */
+      var ra=makeFish(spA,0,x-20,y); ra.age=1;
+      var rb=makeFish(spB,0,x+20,y); rb.age=1;
+      G.fish.push(ra,rb);
       addPearls(15);
-      burst(x,y,44,'#7fa8b8');
+      burst(x,y,30,'#7fa8b8');
       questEvent('merge',1); questEvent('cross',1); bumpStat('merges',1); sfx('fail');
-      G.event={ title:'CROSS FAILED', sub:'BOTH DISSOLVED', id:null, t:EVENT_T, new:false, fail:true };
-      G.timeScale=0.15;
+      G.event={ title:'CROSS FAILED', sub:'BOTH FELL BACK TO RANK 1', id:null, t:EVENT_T, new:false, fail:true };
+      G.timeScale=0.3;
       recalcOxygen(); save();
       return true;
     }
@@ -2688,7 +2749,7 @@ function drawFish(c,f,alpha){
         c.drawImage(rimg,Math.round(f.x-rimg.width/2),Math.round(f.y-rimg.height/2));
         c.globalAlpha=1;
       }
-      if(kind==='chimera')      text(c,'10% OR BOTH DIE',f.x,ly,9,SIGNAL.chimera,'center');
+      if(kind==='chimera')      text(c,'30% CHIMERA',f.x,ly,9,SIGNAL.chimera,'center');
       else if(kind==='unstable')text(c,'25% MUTANT',f.x,ly,8,SIGNAL.unstable,'center');
     }
   }
@@ -2727,10 +2788,16 @@ function drawUI(c){
   layoutButtons();
   /* top status */
   panel(c,10,6,W-20,34,'#0a2a36');
-  text(c,'\u25c4 '+(G.name||'GARDENER').toUpperCase(),20,14,10,'#7fe9d0');
-  BTN.menu={x:12,y:6,w:230,h:34};
-  text(c,'PEARLS '+G.pearls,330,14,10,'#ffd98a');
-  text(c,'SPECIES '+speciesCount()+'/'+SPECIES_ORDER.length,540,14,10,'#b8f6ff');
+  /* an explicit MENU button - the old exit was a tap on the name, which nobody found */
+  panel(c,14,9,86,28,'#175f6d');
+  tri(c,26,23,7,6,180,'#eafffb',0);
+  text(c,'MENU',52,15,9,'#eafffb','center');
+  BTN.menu={x:14,y:9,w:86,h:28};
+  /* the name is still tappable, but only to rename now */
+  text(c,(G.name||'GARDENER').toUpperCase(),112,14,9,'#7fe9d0');
+  BTN.rename={x:108,y:6,w:150,h:34};
+  text(c,'PEARLS '+G.pearls,360,14,9,'#ffd98a');
+  text(c,'SPECIES '+speciesCount()+'/'+SPECIES_ORDER.length,560,14,9,'#b8f6ff');
   /* mute */
   var mx=W-30;
   BTN.mute={x:mx-16,y:6,w:34,h:34};
@@ -2762,9 +2829,12 @@ function drawUI(c){
     return;
   }
 
-  /* bottom buttons */
-  for(var k in BTN){
-    var b=BTN[k];
+  /* bottom buttons - iterate the six known keys, never the whole BTN map
+     (which also holds menu, rename and mute, and those have no label) */
+  var bottomKeys=['feed','build','life','speed','quests','codex'];
+  for(var ki=0;ki<bottomKeys.length;ki++){
+    var k=bottomKeys[ki], b=BTN[k];
+    if(!b) continue;
     var ready = (k==='life' && G.spawnTimer<=0 && !tankFull());
     panel(c,b.x,b.y,b.w,b.h, ready ? '#175f6d':'#0e3a47');
     var lab=b.label;
@@ -2887,8 +2957,8 @@ function drawUI(c){
     c.restore();
     text(c,'+',W/2,dy+86,16,'#eafffb','center');
     if(chim){
-      text(c,'10% CHANCE OF A CHIMERA',W/2,dy+150,9,col,'center');
-      text(c,'90% YOU LOSE BOTH FISH',W/2,dy+172,9,'#ff9aa0','center');
+      text(c,'30% CHANCE OF A CHIMERA',W/2,dy+150,9,col,'center');
+      text(c,'70% BOTH FALL BACK TO RANK 1 - NOT LOST',W/2,dy+172,8,'#bfe8f0','center');
     } else {
       text(c,'25% CHANCE OF A MUTANT',W/2,dy+150,9,col,'center');
       text(c,'75% THEY JUST BECOME ONE ORDINARY FISH',W/2,dy+172,8,'#bfe8f0','center');
@@ -3073,31 +3143,60 @@ function drawAudioPanel(c){
 function drawShop(c){
   drawScene(c);
   c.fillStyle='rgba(4,18,26,0.93)'; c.fillRect(0,0,W,H);
-  text(c,'STAR SHOP',W/2,16,14,'#8ffff0','center');
-  text(c,'\u2605 '+(G.stars||0)+' STARS',W/2,42,9,'#ffe08a','center');
-  text(c,'A STAR FOR EACH NEW SPECIES, MORE FROM AWARDS - SPEND ON LOOKS',W/2,60,6,'#7fbfc8','center');
+  text(c,'STAR SHOP',W/2,14,13,'#8ffff0','center');
+  text(c,'\u2605 '+(G.stars||0)+' STARS  -  A STAR PER NEW SPECIES, MORE FROM AWARDS',W/2,38,6,'#ffe08a','center');
   BTN={};
-  for(var i=0;i<COSMETICS.length;i++){
-    var cm=COSMETICS[i], col=i%4, row=Math.floor(i/4);
-    var cw=220, ch=120, cx=40+col*(cw+8), cy=82+row*(ch+10);
+  /* tabs by kind, so 13 items never overflow the screen */
+  var kinds=[['tint','WATER'],['frame','FRAME'],['ornament','ORNAMENT'],['skin','TANK SKIN']];
+  if(!G.shopTab) G.shopTab='tint';
+  for(var t=0;t<kinds.length;t++){
+    var tw=W/4, tx=t*tw;
+    var onTab=(G.shopTab===kinds[t][0]);
+    panel(c,tx+6,54,tw-12,30, onTab?'#175f6d':'#0b2b36');
+    text(c,kinds[t][1],tx+tw/2,64,7, onTab?'#eafffb':'#7fbfc8','center');
+    BTN['stab'+t]={x:tx+6,y:54,w:tw-12,h:30,_k:kinds[t][0]};
+  }
+  var list=COSMETICS.filter(function(cm){ return cm.kind===G.shopTab; });
+  var perRow=Math.min(4,list.length), cw=Math.min(220,Math.floor((W-40)/perRow)-8);
+  var ch=140, top=98;
+  for(var i=0;i<list.length;i++){
+    var cm=list[i], col=i%perRow, row=Math.floor(i/perRow);
+    var totalW=perRow*(cw+8)-8, x0=(W-totalW)/2;
+    var cx=x0+col*(cw+8), cy=top+row*(ch+10);
     var own=!!G.owned[cm.id], on=(G.cosmetic[cm.kind]===cm.id);
     panel(c,cx,cy,cw,ch, on?'#175f6d':'#0a2a36');
-    /* a little preview swatch */
+    var pv={x:cx+10,y:cy+10,w:cw-20,h:70};
     if(cm.kind==='tint'){
-      rp(c,cx+10,cy+10,cw-20,44,'#0d3a48');
-      if(cm.val){ c.fillStyle=cm.val; c.fillRect(cx+10,cy+10,cw-20,44); }
-      else text(c,'CLEAR',cx+cw/2,cy+28,6,'#7fbfc8','center');
+      rp(c,pv.x,pv.y,pv.w,pv.h,'#0d3a48');
+      if(cm.val){ c.fillStyle=cm.val; c.fillRect(pv.x,pv.y,pv.w,pv.h); }
+      else text(c,'CLEAR',cx+cw/2,cy+40,6,'#7fbfc8','center');
+    } else if(cm.kind==='frame'){
+      rp(c,pv.x,pv.y,pv.w,pv.h,'#0d3a48');
+      if(cm.val){ c.fillStyle=cm.val; c.fillRect(pv.x,pv.y,pv.w,4); c.fillRect(pv.x,pv.y+pv.h-4,pv.w,4);
+                  c.fillRect(pv.x,pv.y,4,pv.h); c.fillRect(pv.x+pv.w-4,pv.y,4,pv.h); }
+      else text(c,'PLAIN',cx+cw/2,cy+40,6,'#7fbfc8','center');
+    } else if(cm.kind==='ornament'){
+      rp(c,pv.x,pv.y,pv.w,pv.h,'#0d3a48');
+      if(cm.val && SPR.orn[cm.val]){
+        var oi=SPR.orn[cm.val], osc=Math.min(pv.w/oi.width,(pv.h-4)/oi.height,1);
+        c.drawImage(oi, Math.round(cx+cw/2-oi.width*osc/2), Math.round(pv.y+pv.h-oi.height*osc), Math.round(oi.width*osc), Math.round(oi.height*osc));
+      } else text(c,'NONE',cx+cw/2,cy+40,6,'#7fbfc8','center');
     } else {
-      rp(c,cx+10,cy+10,cw-20,44,'#0d3a48');
-      if(cm.val){ c.fillStyle=cm.val; c.fillRect(cx+10,cy+10,cw-20,3); c.fillRect(cx+10,cy+51,cw-20,3);
-                  c.fillRect(cx+10,cy+10,3,44); c.fillRect(cx+cw-13,cy+10,3,44); }
-      else text(c,'PLAIN',cx+cw/2,cy+28,6,'#7fbfc8','center');
+      /* skin preview: a little tank with this skin's frame, water and substrate */
+      var sv=cm.val;
+      rp(c,pv.x,pv.y,pv.w,pv.h,'#0d3a48');
+      if(sv){
+        c.fillStyle=sv.frame; c.fillRect(pv.x,pv.y,pv.w,pv.h);
+        c.fillStyle='#0d3a48'; c.fillRect(pv.x+5,pv.y+5,pv.w-10,pv.h-10);
+        c.fillStyle=sv.edge; c.fillRect(pv.x+3,pv.y+3,pv.w-6,2);
+        c.fillStyle=sv.substrate; c.fillRect(pv.x+5,pv.y+pv.h-10,pv.w-10,5);
+      } else text(c,'CLASSIC',cx+cw/2,cy+40,6,'#7fbfc8','center');
     }
-    text(c,cm.name,cx+cw/2,cy+64,6,'#eafffb','center');
-    if(on) text(c,'EQUIPPED',cx+cw/2,cy+92,6,'#3fd0a8','center');
-    else if(own) text(c,'TAP TO WEAR',cx+cw/2,cy+92,6,'#9fe8dc','center');
-    else text(c,'\u2605 '+cm.cost,cx+cw/2,cy+92,7, (G.stars||0)>=cm.cost?'#ffe08a':'#8a7a4a','center');
-    BTN['cos'+i]={x:cx,y:cy,w:cw,h:ch,_i:i};
+    text(c,cm.name,cx+cw/2,cy+90,6,'#eafffb','center');
+    if(on) text(c,'EQUIPPED',cx+cw/2,cy+114,6,'#3fd0a8','center');
+    else if(own) text(c,'TAP TO WEAR',cx+cw/2,cy+114,6,'#9fe8dc','center');
+    else text(c,'\u2605 '+cm.cost,cx+cw/2,cy+114,7, (G.stars||0)>=cm.cost?'#ffe08a':'#8a7a4a','center');
+    BTN['cos'+i]={x:cx,y:cy,w:cw,h:ch,_id:cm.id};
   }
   panel(c,W/2-80,H-40,160,30,'#175f6d'); text(c,'BACK',W/2,H-31,9,'#eafffb','center');
   BTN.back={x:W/2-80,y:H-40,w:160,h:30};
@@ -3175,8 +3274,48 @@ function drawMuseum(c){
       BTN['m_'+id]={x:cx2,y:yy,w:cw,h:rh-3, _id:id};
     }
   }
+  /* funded plaques hang along the bottom, a lasting mark for a finished collection */
+  var plaqued=0;
+  for(var pp=0;pp<PATRON.length;pp++) if(G.patron[PATRON[pp].id]) plaqued++;
+  if(plaqued>0){
+    for(var pq=0;pq<PATRON.length;pq++){
+      if(!G.patron[PATRON[pq].id]) continue;
+      var pd=PATRON[pq], plx=20+pq*90;
+      rp(c,plx,H-72,80,22,'#0a2a36'); rp(c,plx+2,H-70,76,4,pd.col);
+      text(c,pd.name.split(' ')[0],plx+40,H-64,5,pd.col,'center');
+    }
+  }
+  if(collectionComplete()){
+    panel(c,W-210,H-44,180,34,'#3a2f10'); rp(c,W-210,H-44,180,3,'#e0c060');
+    text(c,'PATRON '+plaqued+'/'+PATRON.length,W-120,H-33,8,'#ffe08a','center');
+    BTN.patron={x:W-210,y:H-44,w:180,h:34};
+  }
   panel(c,W/2-80,H-40,160,30,'#175f6d'); text(c,'BACK',W/2,H-31,9,'#eafffb','center');
   BTN.back={x:W/2-80,y:H-40,w:160,h:30};
+}
+function drawPatron(c){
+  drawScene(c);
+  c.fillStyle='rgba(4,18,26,0.94)'; c.fillRect(0,0,W,H);
+  text(c,'MUSEUM PATRON',W/2,18,13,'#e0c060','center');
+  text(c,'YOU FINISHED THE COLLECTION. NOW LEAVE YOUR MARK.',W/2,42,6,'#bfe8f0','center');
+  text(c,'PEARLS '+G.pearls,W/2,60,8,'#ffd98a','center');
+  BTN={};
+  for(var i=0;i<PATRON.length;i++){
+    var pd=PATRON[i], py=88+i*76, done=!!G.patron[pd.id];
+    var can=G.pearls>=pd.cost;
+    panel(c,120,py,W-240,66, done?'#123f34':'#0a2a36');
+    rp(c,132,py+12,60,42,'#06202a'); rp(c,134,py+14,56,6,pd.col);
+    for(var d2=0;d2<10;d2++) px(c,140+d2*5,py+30,pd.col);
+    text(c,pd.name,210,py+18,9, done?'#3fd0a8':'#eafffb');
+    text(c, done?'UNVEILED':(pd.cost+' PEARLS'),210,py+40,7, done?'#3fd0a8':(can?'#ffd98a':'#8a5a5a'));
+    if(!done){
+      panel(c,W-260,py+16,120,34, can?'#175f6d':'#0e2a30');
+      text(c,'FUND',W-200,py+27,8, can?'#eafffb':'#5f8b95','center');
+      BTN['fund'+i]={x:W-260,y:py+16,w:120,h:34,_id:pd.id};
+    }
+  }
+  panel(c,W/2-80,H-42,160,32,'#175f6d'); text(c,'BACK',W/2,H-32,9,'#eafffb','center');
+  BTN.back={x:W/2-80,y:H-42,w:160,h:32};
 }
 function drawSummary(c){
   drawScene(c);
@@ -3373,6 +3512,7 @@ function render(){
   if(G.scene==='awards'){ drawAwards(c); return; }
   if(G.scene==='shop'){ drawShop(c); return; }
   if(G.scene==='museum'){ drawMuseum(c); return; }
+  if(G.scene==='patron'){ drawPatron(c); return; }
   if(G.scene==='board'){ drawBoard(c); return; }
   if(G.scene==='codex'){ drawCodex(c); return; }
   drawScene(c);
@@ -3439,20 +3579,30 @@ function onDown(e){
   if(G.scene==='awards'){ if(hit(BTN.back,p)) G.scene='menu'; return; }
   if(G.scene==='shop'){
     if(hit(BTN.back,p)){ G.scene='menu'; return; }
+    for(var t2=0;t2<4;t2++){ if(BTN['stab'+t2] && hit(BTN['stab'+t2],p)){ G.shopTab=BTN['stab'+t2]._k; return; } }
     for(var sk in BTN){
       if(sk.indexOf('cos')!==0 || !hit(BTN[sk],p)) continue;
-      var cm=COSMETICS[BTN[sk]._i];
+      var cm=cosmeticDef(BTN[sk]._id);
+      if(!cm) continue;
       if(!G.owned[cm.id]){
         if((G.stars||0)<cm.cost){ toast('NOT ENOUGH STARS'); sfx('nope'); return; }
         addStars(-cm.cost); G.owned[cm.id]=true; sfx('quest');
       }
-      G.cosmetic[cm.kind]=cm.id; save();
+      G.cosmetic[cm.kind]=cm.id;
+      if(cm.kind==='skin') bakeGlass();      // the skin lives in the baked glass layer
+      save();
       return;
     }
     return;
   }
+  if(G.scene==='patron'){
+    if(hit(BTN.back,p)){ G.scene='museum'; return; }
+    for(var fk in BTN){ if(fk.indexOf('fund')===0 && hit(BTN[fk],p)){ fundPlaque(BTN[fk]._id); return; } }
+    return;
+  }
   if(G.scene==='museum'){
     if(G.museumSel){ if(hit(BTN.back,p)) G.museumSel=null; return; }
+    if(BTN.patron && hit(BTN.patron,p)){ G.scene='patron'; return; }
     if(hit(BTN.back,p)){ G.scene='menu'; return; }
     for(var mk in BTN){ if(mk.indexOf('m_')===0 && hit(BTN[mk],p) && G.discovered[BTN[mk]._id]){ G.museumSel=BTN[mk]._id; return; } }
     return;
@@ -3521,7 +3671,8 @@ function onDown(e){
     audioMute(!AU.muted);
     return;
   }
-  if(hit(BTN.menu,p)){ G.scene = sessionEmpty() ? 'menu' : 'summary'; G.feedOpen=G.buildOpen=G.questsOpen=false; save(); lbSubmit(); return; }
+  if(hit(BTN.menu,p)){ G.scene = sessionEmpty() ? 'menu' : 'summary'; G.feedOpen=G.buildOpen=G.questsOpen=false; G.audioPanel=false; save(); lbSubmit(); return; }
+  if(BTN.rename && hit(BTN.rename,p)){ askName(); return; }
   if(hit(BTN.feed,p)){ G.feedOpen=!G.feedOpen; G.buildOpen=false; G.questsOpen=false; return; }
   if(hit(BTN.build,p)){ G.buildOpen=!G.buildOpen; G.feedOpen=false; G.questsOpen=false; return; }
   if(hit(BTN.quests,p)){ G.questsOpen=!G.questsOpen; G.feedOpen=false; G.buildOpen=false; return; }
@@ -3587,8 +3738,8 @@ function onUp(){
    BOOT + LOOP
    ============================================================ */
 function newGame(){
-  G.pearls=60; G.stars=0; G.discovered={}; G.unlocked={}; G.achs={}; G.badges={};
-  G.owned={tint_none:true,frame_none:true,orn_none:true}; G.cosmetic={tint:'tint_none',frame:'frame_none',ornament:'orn_none'};
+  G.pearls=60; G.stars=0; G.discovered={}; G.unlocked={}; G.achs={}; G.badges={}; G.patron={};
+  G.owned={tint_none:true,frame_none:true,orn_none:true,skin_none:true}; G.cosmetic={tint:'tint_none',frame:'frame_none',ornament:'orn_none',skin:'skin_none'};
   G.stats={merges:0,mutants:0,chimeras:0,released:0,fed:0};
   G.tips={}; G.tip=null; G.tipGap=0;
   G.fish=[]; G.decor=[]; G.quests=[]; G.pellets=[]; G.parts=[]; G.bubbles=[];
@@ -3631,6 +3782,7 @@ function boot(){
   if(!had || !G.fish.length){ newGame(); }
   fillQuests(); recalcEnv(); recalcOxygen(); checkAchs();
   if(had && G._savedAt) G.away = runAway((Date.now()-G._savedAt)/1000);
+  if(G.cosmetic.skin && G.cosmetic.skin!=='skin_none') bakeGlass();
   sessionStart();
   AU.bpm=biome().bpm; SC=biome().scale;
   if(G.biome!=='pond') bakeScene();
@@ -3660,19 +3812,24 @@ function boot(){
   document.addEventListener('mousedown',arm,true);
   document.addEventListener('click',arm,true);
   document.addEventListener('keydown',arm,true);
-  if(!G.name){
-    var ov=document.getElementById('nameOv');
-    ov.style.display='flex';
-    document.getElementById('nameOk').addEventListener('click',function(){
-      var v=(document.getElementById('nameIn').value||'GARDENER').trim().slice(0,14);
-      G.name=v||'GARDENER'; ov.style.display='none'; save();
-    });
-  }
+  if(!G.name) askName();
   requestAnimationFrame(frame);
+}
+function askName(){
+  if(typeof document==='undefined') return;
+  var ov=document.getElementById('nameOv'); if(!ov) return;
+  var inp=document.getElementById('nameIn'), ok=document.getElementById('nameOk');
+  inp.value = G.name && G.name!=='GARDENER' ? G.name : '';
+  ov.style.display='flex';
+  ok.textContent = G.name ? 'OK' : 'START';
+  ok.onclick=function(){
+    var v=(inp.value||'GARDENER').trim().slice(0,14);
+    G.name=v||'GARDENER'; ov.style.display='none'; save();
+  };
 }
 /* expose for the headless test harness */
 if(typeof window!=='undefined'){
-  window.__DG={G:G,get BTN(){return BTN;},tryResume:tryResume,audioReport:audioReport,audioTest:audioTest,speciesCount:speciesCount,discover:discover,get confirmBtns(){return G.confirmBtns;},isFinalForm:isFinalForm,SPECIES:SPECIES,TIPS:TIPS,COSMETICS:COSMETICS,sellPrice:sellPrice,cosmeticDef:cosmeticDef,equipped:equipped,addStars:addStars,BADGES:BADGES,badgeDef:badgeDef,badgeStat:badgeStat,checkBadges:checkBadges,ts:ts,UI_MIN:UI_MIN,codexPages:codexPages,CODEX_PER_PAGE:CODEX_PER_PAGE,codexCell:codexCell,runAway:runAway,AWAY_CAP:AWAY_CAP,sessionStart:sessionStart,sessionEmpty:sessionEmpty,tipTick:tipTick,dismissTip:dismissTip,tipDef:tipDef,SPR:SPR,RIPEN:RIPEN,BIOMES:BIOMES,setBiome:setBiome,biomeDef:biomeDef,bakeScene:bakeScene,AU:AU,audioInit:audioInit,armAudio:armAudio,audioReady:audioReady,unlockSession:unlockSession,audioMute:audioMute,musicTick:musicTick,sfx:sfx,musicStep:musicStep,ACHS:ACHS,LOCKED_BASE:LOCKED_BASE,availableBase:availableBase,newGame:newGame,checkAchs:checkAchs,bumpStat:bumpStat,LB:LB,lbVisible:lbVisible,hasSave:hasSave,fishFrames:fishFrames,fishGlow:fishGlow,SIGNAL:SIGNAL,releaseFish:releaseFish,EVENT_T:EVENT_T,tankFull:tankFull,RANK_O2:RANK_O2,DECOR:DECOR,DECOR_MAX:DECOR_MAX,QUEST_POOL:QUEST_POOL,placeDecor:placeDecor,removeDecor:removeDecor,recalcEnv:recalcEnv,questEvent:questEvent,fillQuests:fillQuests,questDef:questDef,save:save,update:update,render:render,tryMerge:tryMerge,mergeKind:mergeKind,CHIMERA:CHIMERA,CHIMERA_CHANCE:CHIMERA_CHANCE,chimeraKey:chimeraKey,
+  window.__DG={G:G,get BTN(){return BTN;},tryResume:tryResume,bakeGlass:bakeGlass,PATRON:PATRON,patronDef:patronDef,fundPlaque:fundPlaque,collectionComplete:collectionComplete,get _lastFills(){return _glassFills;},audioReport:audioReport,audioTest:audioTest,speciesCount:speciesCount,discover:discover,get confirmBtns(){return G.confirmBtns;},isFinalForm:isFinalForm,SPECIES:SPECIES,TIPS:TIPS,COSMETICS:COSMETICS,sellPrice:sellPrice,cosmeticDef:cosmeticDef,equipped:equipped,addStars:addStars,BADGES:BADGES,badgeDef:badgeDef,badgeStat:badgeStat,checkBadges:checkBadges,ts:ts,UI_MIN:UI_MIN,codexPages:codexPages,CODEX_PER_PAGE:CODEX_PER_PAGE,codexCell:codexCell,runAway:runAway,AWAY_CAP:AWAY_CAP,sessionStart:sessionStart,sessionEmpty:sessionEmpty,tipTick:tipTick,dismissTip:dismissTip,tipDef:tipDef,SPR:SPR,RIPEN:RIPEN,BIOMES:BIOMES,setBiome:setBiome,biomeDef:biomeDef,bakeScene:bakeScene,AU:AU,audioInit:audioInit,armAudio:armAudio,audioReady:audioReady,unlockSession:unlockSession,audioMute:audioMute,musicTick:musicTick,sfx:sfx,musicStep:musicStep,ACHS:ACHS,LOCKED_BASE:LOCKED_BASE,availableBase:availableBase,newGame:newGame,checkAchs:checkAchs,bumpStat:bumpStat,LB:LB,lbVisible:lbVisible,hasSave:hasSave,fishFrames:fishFrames,fishGlow:fishGlow,SIGNAL:SIGNAL,releaseFish:releaseFish,EVENT_T:EVENT_T,tankFull:tankFull,RANK_O2:RANK_O2,DECOR:DECOR,DECOR_MAX:DECOR_MAX,QUEST_POOL:QUEST_POOL,placeDecor:placeDecor,removeDecor:removeDecor,recalcEnv:recalcEnv,questEvent:questEvent,fillQuests:fillQuests,questDef:questDef,save:save,update:update,render:render,tryMerge:tryMerge,mergeKind:mergeKind,CHIMERA:CHIMERA,CHIMERA_CHANCE:CHIMERA_CHANCE,chimeraKey:chimeraKey,
     makeFish:makeFish,spawnFry:spawnFry,boot:boot,recalcOxygen:recalcOxygen,
     RANK_LEN:RANK_LEN,creatureCanvasSize:creatureCanvasSize,drawCreature:drawCreature,
     SPECIES_ORDER:SPECIES_ORDER,addPearls:addPearls,PEARL_CAP:PEARL_CAP,load:load,FOODS:FOODS};
