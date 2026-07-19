@@ -50,7 +50,7 @@
    Phase 1: core loop (swim / feed / grow / breed / merge / evolve)
    ============================================================ */
 
-var VERSION = 'v5.3';
+var VERSION = 'v5.4';
 var W = 960, H = 540;
 var SAVE_KEY = 'deepgarden_save_v1';
 var FLOOR = 476;          // substrate top
@@ -1944,7 +1944,7 @@ var G = {
   speed:1, spawnTimer:0,
   feedOpen:false, foodIdx:0,
   buildOpen:false, buildIdx:0, buildTab:'decor', questsOpen:false,
-  drag:null, dragOff:{x:0,y:0}, ptr:{x:0,y:0}, confirmMerge:null,
+  drag:null, dragOff:{x:0,y:0}, ptr:{x:0,y:0}, ptrIn:false, confirmMerge:null,
   event:null,            // {title,sub,id,t}
   codexSel:null, codexPage:0, museumSel:null, museumPage:0, confirmNew:false, audioPanel:false, shopTab:'tint',
   
@@ -2626,7 +2626,7 @@ function drawScene(c){
   for(var b=0;b<near.length;b++) drawFish(c,near[b],1);
 
   /* a ghost of what you are about to plant, exactly where it will stand */
-  if(G.buildOpen && G.buildTab==='decor' && G.ptr.y>44 && G.ptr.y<H-62-90){
+  if(G.buildOpen && G.buildTab==='decor' && G.ptrIn && G.ptr.x>40 && G.ptr.y>44 && G.ptr.y<H-62-90){
     var gd=DECOR[G.buildIdx];
     var gimg=gd && SPR.decor[gd.id] ? SPR.decor[gd.id][0] : null;
     if(gimg){
@@ -3674,7 +3674,7 @@ function onDown(e){
   if(hit(BTN.menu,p)){ G.scene = sessionEmpty() ? 'menu' : 'summary'; G.feedOpen=G.buildOpen=G.questsOpen=false; G.audioPanel=false; save(); lbSubmit(); return; }
   if(BTN.rename && hit(BTN.rename,p)){ askName(); return; }
   if(hit(BTN.feed,p)){ G.feedOpen=!G.feedOpen; G.buildOpen=false; G.questsOpen=false; return; }
-  if(hit(BTN.build,p)){ G.buildOpen=!G.buildOpen; G.feedOpen=false; G.questsOpen=false; return; }
+  if(hit(BTN.build,p)){ G.buildOpen=!G.buildOpen; G.feedOpen=false; G.questsOpen=false; G.ptrIn=false; return; }
   if(hit(BTN.quests,p)){ G.questsOpen=!G.questsOpen; G.feedOpen=false; G.buildOpen=false; return; }
   if(hit(BTN.life,p)){
     if(tankFull()) toast('TANK IS FULL - MERGE SOME FISH FIRST');
@@ -3703,7 +3703,7 @@ function onDown(e){
 }
 function onMove(e){
   var p=toLogical(e);
-  G.ptr.x=p.x; G.ptr.y=p.y;
+  G.ptr.x=p.x; G.ptr.y=p.y; G.ptrIn=true;
   if(!G.drag) return;
   G.drag.x=Math.max(24,Math.min(W-24,p.x+G.dragOff.x));
   G.drag.y=Math.max(SURFACE+14,Math.min(FLOOR-8,p.y+G.dragOff.y));
@@ -3796,6 +3796,8 @@ function boot(){
   setTimeout(resize,100); setTimeout(resize,500);
   cv.addEventListener('pointerdown',onDown);
   cv.addEventListener('pointermove',onMove);
+  cv.addEventListener('pointerleave',function(){ G.ptrIn=false; });
+  cv.addEventListener('pointercancel',function(){ G.ptrIn=false; });
   cv.addEventListener('pointerup',onUp);
   cv.addEventListener('pointercancel',onUp);
   cv.addEventListener('pointerleave',onUp);
