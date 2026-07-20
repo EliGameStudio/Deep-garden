@@ -50,7 +50,7 @@
    Phase 1: core loop (swim / feed / grow / breed / merge / evolve)
    ============================================================ */
 
-var VERSION = 'v5.5';
+var VERSION = 'v5.6';
 var W = 960, H = 540;
 var SAVE_KEY = 'deepgarden_save_v1';
 var FLOOR = 476;          // substrate top
@@ -2636,18 +2636,29 @@ function drawScene(c){
     var gd=decorDef(G.placing);
     var gimg=gd && SPR.decor[gd.id] ? SPR.decor[gd.id][0] : null;
     if(gimg){
-      var gx2=Math.max(40,Math.min(W-40, G.ptrIn?G.ptr.x:W/2));
-      var blocked = decorAt(gx2)>=0 || G.pearls<gd.cost || G.decor.length>=DECOR_MAX;
-      /* a soft footprint where it will land */
-      c.globalAlpha=0.5;
-      circ(c,gx2,FLOOR+2,10, blocked?'#ff2828':'#00ff5a');
-      c.globalAlpha=blocked?0.35:0.7;
-      c.drawImage(gimg, Math.round(gx2-gimg.width/2), FLOOR-gimg.height+6);
-      c.globalAlpha=1;
+      /* the piece sits ON THE FLOOR at the finger's x; if the finger hasn't touched
+         yet, park it at centre. It always stands on the floor, never floats. */
+      var gx2 = G.ptrIn ? G.ptr.x : W/2;
+      gx2 = Math.max(120+gimg.width/2, Math.min(W-40-gimg.width/2, gx2));  // stay clear of MENU/left wall
+      var spot = decorAt(gx2);
+      var blocked = spot>=0 || G.pearls<gd.cost || G.decor.length>=DECOR_MAX;
+      var col = blocked ? '#ff5050' : '#00ff5a';
+      var gxl = Math.round(gx2-gimg.width/2), gyt = FLOOR-gimg.height+6;
+      /* the translucent piece, standing on the floor */
+      c.globalAlpha = blocked ? 0.4 : 0.72;
+      c.drawImage(gimg, gxl, gyt);
+      c.globalAlpha = 1;
+      /* a tidy baseline marker directly beneath it - a bracket, not a stray line */
+      c.globalAlpha = 0.85;
+      rp(c, gxl, FLOOR+4, gimg.width, 2, col);
+      rp(c, gxl, FLOOR+4, 2, 6, col);
+      rp(c, gxl+gimg.width-2, FLOOR+4, 2, 6, col);
+      c.globalAlpha = 1;
       var lbl = G.pearls<gd.cost ? 'NOT ENOUGH PEARLS'
               : (G.decor.length>=DECOR_MAX ? 'NO ROOM LEFT'
-              : (decorAt(gx2)>=0 ? 'TAKEN - TAP ELSEWHERE' : 'TAP TO PLACE  -  '+gd.name));
-      text(c,lbl,gx2,FLOOR-gimg.height-14,7, blocked?'#ff2828':'#00ff5a','center');
+              : (spot>=0 ? 'SPOT TAKEN - MOVE OVER' : 'TAP HERE TO PLACE'));
+      panel(c, gx2-90, gyt-26, 180, 18, 'rgba(6,26,34,0.85)');
+      text(c, lbl, gx2, gyt-22, 7, col, 'center');
     }
   }
 
@@ -2943,20 +2954,21 @@ function drawUI(c){
   /* environment readout: what the tank itself is pushing */
   var envTxt='', ei;
   for(ei=0;ei<AXES.length;ei++) if(G.env[AXES[ei]]>0) envTxt+=(envTxt?'  ':'')+AXES[ei]+' x'+G.env[AXES[ei]];
-  if(envTxt) text(c,'TANK LEANS: '+envTxt,W/2,56,7,'rgba(160,230,240,0.65)','center');
+  if(envTxt && !G.drag) text(c,'TANK LEANS: '+envTxt,W/2,56,7,'rgba(160,230,240,0.65)','center');
 
-  /* while a fish is held: its name and rank, big, across the top of the tank */
+  /* while a fish is held: one clean bar with its name + rank + kind, clear of the
+     TANK LEANS line (which we hide meanwhile) so nothing overlaps */
   if(G.drag){
     var hs=SPECIES[G.drag.sp];
-    var hname = hs ? hs.name : '?';
-    var hrank = 'L'+(G.drag.rank+1);
-    var htint = speciesTint(hs, true);
-    panel(c, W/2-190, 48, 380, 34, 'rgba(6,26,34,0.82)');
-    text(c, hname, W/2-8, 57, 11, htint, 'right');
-    text(c, hrank, W/2+12, 57, 11, '#ffe08a', 'left');
-    if(isFinalForm(G.drag.sp)) text(c,'\u2605 FINAL FORM', W/2, 72, 6, '#c8a44e','center');
-    else if(hs && hs.chimera) text(c,'CHIMERA', W/2, 72, 6, SIGNAL.chimera,'center');
-    else if(hs && hs.mutantOf) text(c,'MUTANT', W/2, 72, 6, SIGNAL.unstable,'center');
+    var hname = (hs ? hs.name : '?') + '  L' + (G.drag.rank+1);
+    var kindTxt='', kindCol='#9fe8dc';
+    if(isFinalForm(G.drag.sp)){ kindTxt='FINAL FORM'; kindCol='#c8a44e'; }
+    else if(hs && hs.chimera){ kindTxt='CHIMERA'; kindCol=SIGNAL.chimera; }
+    else if(hs && hs.mutantOf){ kindTxt='MUTANT'; kindCol=SIGNAL.unstable; }
+    var bw4=Math.max(220, hname.length*ts(11)+40);
+    panel(c, W/2-bw4/2, 46, bw4, 30, 'rgba(6,26,34,0.9)');
+    text(c, hname, W/2, 54, 11, speciesTint(hs,true), 'center');
+    if(kindTxt){ panel(c, W/2-bw4/2, 78, bw4, 18, 'rgba(6,26,34,0.7)'); text(c, kindTxt, W/2, 82, 6, kindCol, 'center'); }
   }
 
   /* a small badge above the bar, not a slab over the whole tank */
@@ -3877,7 +3889,7 @@ function askName(){
 }
 /* expose for the headless test harness */
 if(typeof window!=='undefined'){
-  window.__DG={G:G,get BTN(){return BTN;},tryResume:tryResume,bakeGlass:bakeGlass,PATRON:PATRON,patronDef:patronDef,fundPlaque:fundPlaque,collectionComplete:collectionComplete,get _lastFills(){return _glassFills;},audioReport:audioReport,audioTest:audioTest,speciesCount:speciesCount,discover:discover,get confirmBtns(){return G.confirmBtns;},isFinalForm:isFinalForm,SPECIES:SPECIES,TIPS:TIPS,COSMETICS:COSMETICS,sellPrice:sellPrice,cosmeticDef:cosmeticDef,equipped:equipped,addStars:addStars,BADGES:BADGES,badgeDef:badgeDef,badgeStat:badgeStat,checkBadges:checkBadges,ts:ts,UI_MIN:UI_MIN,codexPages:codexPages,CODEX_PER_PAGE:CODEX_PER_PAGE,codexCell:codexCell,runAway:runAway,AWAY_CAP:AWAY_CAP,sessionStart:sessionStart,sessionEmpty:sessionEmpty,tipTick:tipTick,dismissTip:dismissTip,tipDef:tipDef,SPR:SPR,RIPEN:RIPEN,BIOMES:BIOMES,setBiome:setBiome,biomeDef:biomeDef,bakeScene:bakeScene,AU:AU,audioInit:audioInit,armAudio:armAudio,audioReady:audioReady,unlockSession:unlockSession,audioMute:audioMute,musicTick:musicTick,sfx:sfx,musicStep:musicStep,ACHS:ACHS,LOCKED_BASE:LOCKED_BASE,availableBase:availableBase,newGame:newGame,checkAchs:checkAchs,bumpStat:bumpStat,LB:LB,lbVisible:lbVisible,hasSave:hasSave,fishFrames:fishFrames,fishGlow:fishGlow,SIGNAL:SIGNAL,releaseFish:releaseFish,EVENT_T:EVENT_T,tankFull:tankFull,RANK_O2:RANK_O2,DECOR:DECOR,DECOR_MAX:DECOR_MAX,QUEST_POOL:QUEST_POOL,placeDecor:placeDecor,removeDecor:removeDecor,recalcEnv:recalcEnv,questEvent:questEvent,fillQuests:fillQuests,questDef:questDef,save:save,update:update,render:render,tryMerge:tryMerge,mergeKind:mergeKind,CHIMERA:CHIMERA,CHIMERA_CHANCE:CHIMERA_CHANCE,chimeraKey:chimeraKey,
+  window.__DG={G:G,get BTN(){return BTN;},setRenderTarget:function(nc){ cv=nc; ctx=nc.getContext('2d'); ctx.imageSmoothingEnabled=false; },tryResume:tryResume,bakeGlass:bakeGlass,PATRON:PATRON,patronDef:patronDef,fundPlaque:fundPlaque,collectionComplete:collectionComplete,get _lastFills(){return _glassFills;},audioReport:audioReport,audioTest:audioTest,speciesCount:speciesCount,discover:discover,get confirmBtns(){return G.confirmBtns;},isFinalForm:isFinalForm,SPECIES:SPECIES,TIPS:TIPS,COSMETICS:COSMETICS,sellPrice:sellPrice,cosmeticDef:cosmeticDef,equipped:equipped,addStars:addStars,BADGES:BADGES,badgeDef:badgeDef,badgeStat:badgeStat,checkBadges:checkBadges,ts:ts,UI_MIN:UI_MIN,codexPages:codexPages,CODEX_PER_PAGE:CODEX_PER_PAGE,codexCell:codexCell,runAway:runAway,AWAY_CAP:AWAY_CAP,sessionStart:sessionStart,sessionEmpty:sessionEmpty,tipTick:tipTick,dismissTip:dismissTip,tipDef:tipDef,SPR:SPR,RIPEN:RIPEN,BIOMES:BIOMES,setBiome:setBiome,biomeDef:biomeDef,bakeScene:bakeScene,AU:AU,audioInit:audioInit,armAudio:armAudio,audioReady:audioReady,unlockSession:unlockSession,audioMute:audioMute,musicTick:musicTick,sfx:sfx,musicStep:musicStep,ACHS:ACHS,LOCKED_BASE:LOCKED_BASE,availableBase:availableBase,newGame:newGame,checkAchs:checkAchs,bumpStat:bumpStat,LB:LB,lbVisible:lbVisible,hasSave:hasSave,fishFrames:fishFrames,fishGlow:fishGlow,SIGNAL:SIGNAL,releaseFish:releaseFish,EVENT_T:EVENT_T,tankFull:tankFull,RANK_O2:RANK_O2,DECOR:DECOR,DECOR_MAX:DECOR_MAX,QUEST_POOL:QUEST_POOL,placeDecor:placeDecor,removeDecor:removeDecor,recalcEnv:recalcEnv,questEvent:questEvent,fillQuests:fillQuests,questDef:questDef,save:save,update:update,render:render,tryMerge:tryMerge,mergeKind:mergeKind,CHIMERA:CHIMERA,CHIMERA_CHANCE:CHIMERA_CHANCE,chimeraKey:chimeraKey,
     makeFish:makeFish,spawnFry:spawnFry,boot:boot,recalcOxygen:recalcOxygen,
     RANK_LEN:RANK_LEN,creatureCanvasSize:creatureCanvasSize,drawCreature:drawCreature,
     SPECIES_ORDER:SPECIES_ORDER,addPearls:addPearls,PEARL_CAP:PEARL_CAP,load:load,FOODS:FOODS};
