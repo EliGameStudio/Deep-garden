@@ -50,7 +50,7 @@
    Phase 1: core loop (swim / feed / grow / breed / merge / evolve)
    ============================================================ */
 
-var VERSION = 'v6.1';
+var VERSION = 'v6.2';
 var W = 960, H = 540;
 var SAVE_KEY = 'deepgarden_save_v1';
 var FLOOR = 476;          // substrate top
@@ -1936,6 +1936,9 @@ var G = {
   badges:{},             // milestone badge id -> true
   patron:{},             // funded museum plaques
   showcase:[],            // final forms settled into the trophy tank (not sold)
+  scDecor:[],             // decorations placed in the showcase (cosmetic only)
+  scTool:'move',          // showcase edit tool: move | decorate | name
+  scDrag:null, scPlacing:null,
   owned:{tint_none:true,frame_none:true,orn_none:true,skin_none:true}, cosmetic:{tint:'tint_none',frame:'frame_none',ornament:'orn_none',skin:'skin_none'},
   stats:{merges:0,mutants:0,chimeras:0,released:0,fed:0},
   tips:{}, tip:null, tipGap:0,
@@ -1962,7 +1965,8 @@ var G = {
 function save(){
   try{
     var d={ v:3, name:G.name, pearls:G.pearls, discovered:G.discovered, spawnTimer:G.spawnTimer,
-      unlocked:G.unlocked, achs:G.achs, badges:G.badges, patron:G.patron, showcase:G.showcase.map(function(z){return {s:z.sp,r:z.rank,x:Math.round(z.x),y:Math.round(z.y),dir:z.dir};}), stats:G.stats, stars:G.stars,
+      unlocked:G.unlocked, achs:G.achs, badges:G.badges, patron:G.patron, showcase:G.showcase.map(function(z){return {s:z.sp,r:z.rank,x:Math.round(z.x),y:Math.round(z.y),dir:z.dir,nm:z.custom||''};}),
+      scDecor:G.scDecor.map(function(z){return {id:z.id,x:Math.round(z.x)};}), stats:G.stats, stars:G.stars,
       owned:G.owned, cosmetic:G.cosmetic, muted:AU.muted?1:0, tips:G.tips,
       savedAt:Date.now(),
       biome:G.biome, biomesOwned:G.biomesOwned,
@@ -2004,6 +2008,13 @@ function load(){
   G.stars = num(d.stars,0,0,9999);
   G.patron = {};
   if(d.patron && typeof d.patron==='object'){ for(var kp in d.patron) if(patronDef(kp)) G.patron[kp]=true; }
+  G.scDecor = [];
+  if(Array.isArray(d.scDecor)){
+    for(var di=0;di<d.scDecor.length && di<20;di++){
+      var sd=d.scDecor[di];
+      if(sd && decorDef(sd.id)) G.scDecor.push({ id:sd.id, x:num(sd.x,480,40,920) });
+    }
+  }
   G.showcase = [];
   if(Array.isArray(d.showcase)){
     for(var si=0;si<d.showcase.length && si<60;si++){
@@ -2011,7 +2022,7 @@ function load(){
       if(sc && SPECIES[sc.s||sc.sp]){
         G.showcase.push({ sp:sc.s||sc.sp, rank:num(sc.r!==undefined?sc.r:sc.rank,2,0,2),
           x:num(sc.x,480,20,940), y:num(sc.y,240,120,380), dir:sc.dir===-1?-1:1,
-          bob:gameRnd()*6.28, name:(SPECIES[sc.s||sc.sp].name) });
+          bob:gameRnd()*6.28, name:(SPECIES[sc.s||sc.sp].name), custom:(typeof sc.nm==='string'?sc.nm.slice(0,12):'') });
       }
     }
   }
@@ -3227,26 +3238,52 @@ function drawMenu(c){
   if(G.name) text(c,G.name.toUpperCase()+'   SPECIES '+speciesCount()+'/'+SPECIES_ORDER.length,16,H-22,8,'rgba(160,220,230,0.6)');
   text(c,'\u2605 '+(G.stars||0)+' STARS',W-16,H-46,9,'#ffe08a','right');
 }
+function scFishAt(p){
+  for(var i=G.showcase.length-1;i>=0;i--){
+    var z=G.showcase[i];
+    if(Math.abs(p.x-z.x)<34 && Math.abs(p.y-z.y)<28) return z;
+  }
+  return null;
+}
+function askShowcaseName(z){
+  if(typeof document==='undefined') return;
+  var ov=document.getElementById('nameOv'); if(!ov) return;
+  var inp=document.getElementById('nameIn'), ok=document.getElementById('nameOk');
+  inp.value = z.custom || '';
+  ov.style.display='flex'; ok.textContent='OK';
+  ok.onclick=function(){ z.custom=(inp.value||'').trim().slice(0,12); ov.style.display='none'; save(); };
+}
 function drawShowcase(c){
-  /* a calm, separate tank - trophies only, nothing to sell or merge here */
+  /* your dream tank: arrange trophies, decorate, name them. Nothing sells or merges. */
+  var sk=equipped('skin').val;
   c.drawImage(SPR.bg,0,0);
   c.drawImage(SPR.far,0,0);
   if(SPR.rays) c.drawImage(SPR.rays,0,0);
-  c.fillStyle='rgba(6,20,28,0.35)'; c.fillRect(0,0,W,H);
-  text(c,'\u2605 YOUR SHOWCASE',W/2,16,13,'#ffe0a0','center');
+  c.fillStyle='rgba(6,20,28,0.30)'; c.fillRect(0,0,W,H);
+  c.drawImage(SPR.floorL,0,FLOOR-8);
+
+  /* placed decor sits on the floor, behind the fish */
+  for(var d=0;d<G.scDecor.length;d++){
+    var sd=G.scDecor[d], dimg=SPR.decor[sd.id]?SPR.decor[sd.id][0]:null;
+    if(dimg) c.drawImage(dimg, Math.round(sd.x-dimg.width/2), FLOOR-dimg.height+6);
+  }
+
+  text(c,'\u2605 YOUR SHOWCASE',W/2,14,12,'#ffe0a0','center');
   if(G.showcase.length===0){
     text(c,'YOUR FINEST FISH WILL LIVE HERE',W/2,H/2-16,9,'#bfe8d0','center');
-    text(c,'HOLD A FINAL FORM OVER THE BOTTOM BAR',W/2,H/2+8,8,'#9fc8c0','center');
+    text(c,'HOLD A FINAL FORM OVER THE BOTTOM BAR IN THE TANK',W/2,H/2+8,8,'#9fc8c0','center');
     text(c,'AND CHOOSE  \u2605 KEEP IN SHOWCASE  INSTEAD OF SELLING',W/2,H/2+28,8,'#9fc8c0','center');
-  } else {
-    text(c,G.showcase.length+' TROPHY FISH',W/2,38,7,'#9fe8dc','center');
   }
-  /* each settled fish drifts gently */
+
+  /* the trophy fish - stand still in MOVE mode so you can arrange them, drift otherwise */
   for(var i=0;i<G.showcase.length;i++){
     var z=G.showcase[i];
-    z.x += Math.sin(G.t*0.5+z.bob)*0.3*z.dir;
-    if(z.x<80){ z.x=80; z.dir=1; } if(z.x>W-80){ z.x=W-80; z.dir=-1; }
-    var by=z.y+Math.sin(G.t*1.1+z.bob)*6;
+    if(G.scTool!=='move' || G.scDrag===z){
+      // gentle drift when not arranging
+      if(G.scDrag!==z){ z.x += Math.sin(G.t*0.5+z.bob)*0.25*z.dir;
+        if(z.x<80){ z.x=80; z.dir=1; } if(z.x>W-80){ z.x=W-80; z.dir=-1; } }
+    }
+    var by=(G.scDrag===z)?z.y:z.y+Math.sin(G.t*1.1+z.bob)*5;
     var frames=fishFrames(z.sp,z.rank);
     var img=frames[Math.floor(G.t*3+z.bob)%frames.length]||frames[0];
     var gl=fishGlow(z.sp);
@@ -3255,11 +3292,56 @@ function drawShowcase(c){
     if(z.dir<0){ c.translate(Math.round(z.x),0); c.scale(-1,1); c.drawImage(img,Math.round(-img.width/2),Math.round(by-img.height/2)); }
     else c.drawImage(img,Math.round(z.x-img.width/2),Math.round(by-img.height/2));
     c.restore();
-    /* a tiny gold crown marks each as a final form */
-    rp(c,Math.round(z.x)-6,Math.round(by-img.height/2)-8,12,2,'#c8a44e');
+    rp(c,Math.round(z.x)-6,Math.round(by-img.height/2)-8,12,2,'#c8a44e');   // gold crown
+    /* a custom name under the fish, if given */
+    if(z.custom) text(c, z.custom, z.x, by+img.height/2+4, 7, '#ffe0a0', 'center');
+    /* in move mode, a faint handle ring so it reads as draggable */
+    if(G.scTool==='move'){ c.globalAlpha=0.3; rp(c,Math.round(z.x)-1,Math.round(by)-1,2,2,'#eafffb'); c.globalAlpha=1; }
   }
-  panel(c,W/2-80,H-44,160,32,'#175f6d'); text(c,'BACK',W/2,H-34,9,'#eafffb','center');
-  BTN={back:{x:W/2-80,y:H-44,w:160,h:32}};
+
+  /* the decor ghost being placed follows the finger, on the floor */
+  if(G.scPlacing){
+    var gd=decorDef(G.scPlacing), gimg=gd&&SPR.decor[gd.id]?SPR.decor[gd.id][0]:null;
+    if(gimg){
+      var gx=G.ptrIn?Math.max(40+gimg.width/2,Math.min(W-40-gimg.width/2,G.ptr.x)):W/2;
+      c.globalAlpha=0.7; c.drawImage(gimg, Math.round(gx-gimg.width/2), FLOOR-gimg.height+6); c.globalAlpha=1;
+      rp(c, Math.round(gx-gimg.width/2), FLOOR+4, gimg.width, 2, '#00ff5a');
+      panel(c,gx-70,FLOOR-gimg.height-24,140,18,'rgba(6,26,34,0.85)');
+      text(c,'TAP TO PLACE',gx,FLOOR-gimg.height-20,7,'#00ff5a','center');
+    }
+  }
+
+  /* the tool bar */
+  var tools=[['move','MOVE'],['decorate','DECORATE'],['name','NAME']];
+  var tw=200, gap=10, totalT=tools.length*tw+(tools.length-1)*gap, tx0=(W-totalT)/2;
+  BTN={};
+  for(var t=0;t<tools.length;t++){
+    var on=(G.scTool===tools[t][0]), bx=tx0+t*(tw+gap);
+    panel(c,bx,H-42,tw,30, on?'#175f6d':'#0e3a47');
+    text(c,tools[t][1],bx+tw/2,H-34,9, on?'#eafffb':'#8fb8c0','center');
+    BTN['sctool'+t]={x:bx,y:H-42,w:tw,h:30,_k:tools[t][0]};
+  }
+  panel(c,12,H-42,86,30,'#175f6d'); text(c,'BACK',55,H-34,9,'#eafffb','center');
+  BTN.back={x:12,y:H-42,w:86,h:30};
+
+  /* a one-line hint for the active tool */
+  var hint = G.scTool==='move' ? 'DRAG YOUR FISH TO ARRANGE THEM'
+           : G.scTool==='decorate' ? 'PICK A DECOR BELOW, THEN TAP THE FLOOR'
+           : 'TAP A FISH TO NAME IT';
+  text(c,hint,W/2,H-58,7,'#9fe8dc','center');
+
+  /* decorate mode: a little tray of owned decor to pick from */
+  if(G.scTool==='decorate'){
+    var owned=DECOR;   // all decor kinds are buildable; showcase placement is free (cosmetic)
+    var sw2=Math.min(120,Math.floor((W-40)/owned.length)-6), sy=H-104;
+    for(var k=0;k<owned.length;k++){
+      var sx=20+k*(sw2+6), sel=(G.scPlacing===owned[k].id);
+      panel(c,sx,sy,sw2,40, sel?'#175f6d':'#0a2a36');
+      var di2=SPR.decor[owned[k].id]?SPR.decor[owned[k].id][0]:null;
+      if(di2){ var ds=Math.min(sw2/di2.width,36/di2.height,1); c.drawImage(di2, Math.round(sx+sw2/2-di2.width*ds/2), Math.round(sy+38-di2.height*ds), Math.round(di2.width*ds), Math.round(di2.height*ds)); }
+      BTN['scdec'+k]={x:sx,y:sy,w:sw2,h:40,_id:owned[k].id};
+    }
+  }
 }
 function drawAudioPanel(c){
   c.fillStyle='rgba(4,18,26,0.94)'; c.fillRect(0,0,W,H);
@@ -3750,7 +3832,32 @@ function onDown(e){
     }
     return;
   }
-  if(G.scene==='showcase'){ if(hit(BTN.back,p)){ G.scene='menu'; return; } return; }
+  if(G.scene==='showcase'){
+    if(hit(BTN.back,p)){ G.scPlacing=null; G.scDrag=null; G.scene='menu'; save(); return; }
+    // tool switch
+    for(var t=0;t<3;t++){ if(BTN['sctool'+t] && hit(BTN['sctool'+t],p)){ G.scTool=BTN['sctool'+t]._k; G.scPlacing=null; G.scDrag=null; return; } }
+    if(G.scTool==='decorate'){
+      // pick a decor to place (tap tray), or place the held one on the floor
+      for(var k in BTN){ if(k.indexOf('scdec')===0 && hit(BTN[k],p)){ G.scPlacing = (G.scPlacing===BTN[k]._id)?null:BTN[k]._id; return; } }
+      if(G.scPlacing && p.y<H-110){
+        if(G.scDecor.length>=12){ toast('SHOWCASE IS FULL'); sfx('nope'); return; }
+        var gd=decorDef(G.scPlacing);
+        G.scDecor.push({ id:G.scPlacing, x:Math.max(60,Math.min(W-60,p.x)) });
+        sfx('decor'); save(); return;
+      }
+      return;
+    }
+    if(G.scTool==='name'){
+      // tap a fish to rename it
+      var nf=scFishAt(p);
+      if(nf){ askShowcaseName(nf); }
+      return;
+    }
+    // move tool: pick up a fish to drag it
+    var mf=scFishAt(p);
+    if(mf){ G.scDrag=mf; }
+    return;
+  }
   if(G.scene==='patron'){
     if(hit(BTN.back,p)){ G.scene='museum'; return; }
     for(var fk in BTN){ if(fk.indexOf('fund')===0 && hit(BTN[fk],p)){ fundPlaque(BTN[fk]._id); return; } }
@@ -3874,12 +3981,14 @@ function onDown(e){
 function onMove(e){
   var p=toLogical(e);
   G.ptr.x=p.x; G.ptr.y=p.y; G.ptrIn=true;
+  if(G.scene==='showcase' && G.scDrag){ G.scDrag.x=Math.max(60,Math.min(W-60,p.x)); G.scDrag.y=Math.max(60,Math.min(FLOOR-30,p.y)); return; }
   if(!G.drag) return;
   G.drag.x=Math.max(24,Math.min(W-24,p.x+G.dragOff.x));
   G.drag.y=Math.max(SURFACE+14,Math.min(FLOOR-8,p.y+G.dragOff.y));
   G.drag.vx=0; G.drag.vy=0;
 }
 function onUp(){
+  if(G.scene==='showcase' && G.scDrag){ G.scDrag=null; save(); return; }
   if(!G.drag) return;
   var d=G.drag; d.held=false; G.drag=null;
   if(G.ptr.y>H-68){
@@ -3918,7 +4027,7 @@ function onUp(){
    BOOT + LOOP
    ============================================================ */
 function newGame(){
-  G.pearls=60; G.stars=0; G.discovered={}; G.unlocked={}; G.achs={}; G.badges={}; G.patron={}; G.showcase=[];
+  G.pearls=60; G.stars=0; G.discovered={}; G.unlocked={}; G.achs={}; G.badges={}; G.patron={}; G.showcase=[]; G.scDecor=[]; G.scTool='move'; G.scDrag=null; G.scPlacing=null;
   G.owned={tint_none:true,frame_none:true,orn_none:true,skin_none:true}; G.cosmetic={tint:'tint_none',frame:'frame_none',ornament:'orn_none',skin:'skin_none'};
   G.stats={merges:0,mutants:0,chimeras:0,released:0,fed:0};
   G.tips={}; G.tip=null; G.tipGap=0;
