@@ -50,7 +50,7 @@
    Phase 1: core loop (swim / feed / grow / breed / merge / evolve)
    ============================================================ */
 
-var VERSION = 'v5.6';
+var VERSION = 'v6.1';
 var W = 960, H = 540;
 var SAVE_KEY = 'deepgarden_save_v1';
 var FLOOR = 476;          // substrate top
@@ -1638,7 +1638,7 @@ function bakeRays(){
     var rnd=mulberry32(0x2A45);
     var beams = B0.id==='kelp' ? 12 : 7;
     for(var i=0;i<beams;i++){
-      var x=Math.round(rnd()*W), wd=(B0.id==='kelp'?5:14)+Math.round(rnd()*(B0.id==='kelp'?10:26));
+      var x=60+Math.round(rnd()*(W-120)), wd=(B0.id==='kelp'?5:14)+Math.round(rnd()*(B0.id==='kelp'?10:26));
       for(var y=SURFACE;y<FLOOR;y+=2){
         var t=(y-SURFACE)/(FLOOR-SURFACE);
         var a=(1-t)*B0.rays;
@@ -1935,6 +1935,7 @@ var G = {
   achs:{},               // achievement id -> true
   badges:{},             // milestone badge id -> true
   patron:{},             // funded museum plaques
+  showcase:[],            // final forms settled into the trophy tank (not sold)
   owned:{tint_none:true,frame_none:true,orn_none:true,skin_none:true}, cosmetic:{tint:'tint_none',frame:'frame_none',ornament:'orn_none',skin:'skin_none'},
   stats:{merges:0,mutants:0,chimeras:0,released:0,fed:0},
   tips:{}, tip:null, tipGap:0,
@@ -1961,7 +1962,7 @@ var G = {
 function save(){
   try{
     var d={ v:3, name:G.name, pearls:G.pearls, discovered:G.discovered, spawnTimer:G.spawnTimer,
-      unlocked:G.unlocked, achs:G.achs, badges:G.badges, patron:G.patron, stats:G.stats, stars:G.stars,
+      unlocked:G.unlocked, achs:G.achs, badges:G.badges, patron:G.patron, showcase:G.showcase.map(function(z){return {s:z.sp,r:z.rank,x:Math.round(z.x),y:Math.round(z.y),dir:z.dir};}), stats:G.stats, stars:G.stars,
       owned:G.owned, cosmetic:G.cosmetic, muted:AU.muted?1:0, tips:G.tips,
       savedAt:Date.now(),
       biome:G.biome, biomesOwned:G.biomesOwned,
@@ -2003,6 +2004,17 @@ function load(){
   G.stars = num(d.stars,0,0,9999);
   G.patron = {};
   if(d.patron && typeof d.patron==='object'){ for(var kp in d.patron) if(patronDef(kp)) G.patron[kp]=true; }
+  G.showcase = [];
+  if(Array.isArray(d.showcase)){
+    for(var si=0;si<d.showcase.length && si<60;si++){
+      var sc=d.showcase[si];
+      if(sc && SPECIES[sc.s||sc.sp]){
+        G.showcase.push({ sp:sc.s||sc.sp, rank:num(sc.r!==undefined?sc.r:sc.rank,2,0,2),
+          x:num(sc.x,480,20,940), y:num(sc.y,240,120,380), dir:sc.dir===-1?-1:1,
+          bob:gameRnd()*6.28, name:(SPECIES[sc.s||sc.sp].name) });
+      }
+    }
+  }
   G.owned = {tint_none:true,frame_none:true,orn_none:true,skin_none:true};
   if(d.owned && typeof d.owned==='object'){ for(var ko in d.owned) if(cosmeticDef(ko)) G.owned[ko]=true; }
   G.cosmetic = {tint:'tint_none',frame:'frame_none',ornament:'orn_none',skin:'skin_none'};
@@ -2250,6 +2262,19 @@ function sellPrice(f){
   if(f.rank===2 && isFinalForm(f.sp)) p += 12;   // a final form is worth keeping around for
   return p;
 }
+function settleFish(f){
+  if(!f) return;
+  var hs=SPECIES[f.sp];
+  G.showcase.push({ sp:f.sp, rank:f.rank, x:120+gameRnd()*720, y:140+gameRnd()*220,
+                    dir:gameRnd()<0.5?1:-1, bob:gameRnd()*6.28, name:(hs?hs.name:'?') });
+  removeFish(f);
+  burst(f.x,f.y,20,'#ffe0a0');
+  for(var i=0;i<12;i++) G.bubbles.push({x:f.x+(gameRnd()-0.5)*20,y:f.y,r:1+Math.round(gameRnd()*2),v:30+gameRnd()*24,w:gameRnd()*6.28});
+  sfx('discover');
+  G.stats.settled=(G.stats.settled||0)+1;
+  recalcOxygen(); save();
+  toast((hs?hs.name:'FISH')+' MOVED TO YOUR SHOWCASE TANK');
+}
 function releaseFish(f){
   if(!f) return;
   var gain=sellPrice(f);
@@ -2386,6 +2411,17 @@ function spawnFry(){
   G.parts.push({x:f.x,y:f.y,vx:0,vy:0,life:0.6,t:0,col:'#9ff0e0'});
   burst(f.x,f.y,10,'#9ff0e0');
   recalcOxygen(); save();
+}
+function feedBaby(f){
+  /* one tap = one mouthful: drop hunger and push growth, exactly like eating a pellet.
+     About three taps takes a fresh fry to full grown, as it used to. */
+  f.hunger=Math.max(0, f.hunger-0.34);
+  f.age=Math.min(1, f.age + 0.34);
+  f.diet[AXES[0]]=Math.min(100, (f.diet[AXES[0]]||0)+1.5);
+  burst(f.x, f.y-4, 4, '#cfe9d8');
+  bumpStat('fed',1); questEvent('feed',1);
+  sfx('feed');
+  if(f.age>=1){ f.ripe=RIPEN; f.ready=false; burst(f.x,f.y,10,'#bff0ff'); toast('ALL GROWN UP!'); }
 }
 function dropFood(x,y){
   var f=FOODS[G.foodIdx];
@@ -2689,6 +2725,7 @@ function drawScene(c){
   var tint=equipped('tint');
   if(tint.val){ c.fillStyle=tint.val; c.fillRect(0,SURFACE,W,H-SURFACE); }
   c.drawImage(SPR.glass,0,0);
+
   var fr=equipped('frame');
   if(fr.val){ c.fillStyle=fr.val; c.fillRect(0,0,W,4); c.fillRect(0,H-4,W,4); c.fillRect(0,0,4,H); c.fillRect(W-4,0,4,H); }
 }
@@ -2808,14 +2845,26 @@ function drawUI(c){
   panel(c,10,6,W-20,34,'#0a2a36');
   /* an explicit MENU button - the old exit was a tap on the name, which nobody found */
   panel(c,14,9,86,28,'#175f6d');
-  tri(c,26,23,7,6,180,'#eafffb',0);
+  tri(c,30,22,7,5,0,'#eafffb',0);   // small left-pointing arrow; off MUST be 0 (it is a y-shift, not an angle)
   text(c,'MENU',52,15,9,'#eafffb','center');
   BTN.menu={x:14,y:9,w:86,h:28};
   /* the name is still tappable, but only to rename now */
   text(c,(G.name||'GARDENER').toUpperCase(),112,14,9,'#7fe9d0');
   BTN.rename={x:108,y:6,w:150,h:34};
-  text(c,'PEARLS '+G.pearls,360,14,9,'#ffd98a');
-  text(c,'SPECIES '+speciesCount()+'/'+SPECIES_ORDER.length,560,14,9,'#b8f6ff');
+  if(G.drag){
+    /* held fish: name + level, front and centre in the status bar */
+    var dhs=SPECIES[G.drag.sp];
+    var dnm=(dhs?dhs.name:'?')+'   LEVEL '+(G.drag.rank+1);
+    var dk='', dkc='#ffd98a';
+    if(isFinalForm(G.drag.sp)){ dk='  FINAL'; dkc='#c8a44e'; }
+    else if(dhs&&dhs.chimera){ dk='  CHIMERA'; dkc='#f0b8ff'; }
+    else if(dhs&&dhs.mutantOf){ dk='  MUTANT'; dkc='#ffd400'; }
+    text(c,dnm,300,14,10,speciesTint(dhs,true),'left');
+    if(dk) text(c,dk,300+ts(10)*dnm.length,14,9,dkc,'left');
+  } else {
+    text(c,'PEARLS '+G.pearls,360,14,9,'#ffd98a');
+    text(c,'SPECIES '+speciesCount()+'/'+SPECIES_ORDER.length,560,14,9,'#b8f6ff');
+  }
   /* mute */
   var mx=W-30;
   BTN.mute={x:mx-16,y:6,w:34,h:34};
@@ -2838,12 +2887,27 @@ function drawUI(c){
   /* a fish in hand: the bar becomes an explicit SELL target with a price on it */
   if(G.drag){
     var price=sellPrice(G.drag);
-    var rp2={x:12,y:H-62,w:W-24,h:46};
     var glow=0.5+Math.sin(G.t*6)*0.3;
+    if(isFinalForm(G.drag.sp)){
+      /* a final form is a trophy: offer SETTLE (keep it) as well as SELL */
+      var half=(W-30)/2;
+      var sxL=12, sxR=12+half+6;
+      c.globalAlpha=glow; rp(c,sxL-4,H-66,half+8,54,'#5a3a1d'); c.globalAlpha=1;
+      panel(c,sxL,H-62,half,46,'#6d4e17');
+      text(c,'\u2605 KEEP IN SHOWCASE',sxL+half/2,H-52,9,'#ffe0a0','center');
+      text(c,'A HOME FOR YOUR BEST',sxL+half/2,H-32,6,'#e8cc90','center');
+      c.globalAlpha=glow; rp(c,sxR-4,H-66,half+8,54,'#1d5f4a'); c.globalAlpha=1;
+      panel(c,sxR,H-62,half,46,'#176d4e');
+      text(c,'SELL FOR '+price+' PEARLS',sxR+half/2,H-52,9,'#dfffe8','center');
+      text(c,'DROP ON A SIDE TO CHOOSE',sxR+half/2,H-32,6,'#bfe8d0','center');
+      G.dropZones={ settle:{x:sxL,y:H-62,w:half,h:46}, sell:{x:sxR,y:H-62,w:half,h:46} };
+      return;
+    }
+    var rp2={x:12,y:H-62,w:W-24,h:46};
     c.globalAlpha=glow; rp(c,rp2.x-6,rp2.y-6,rp2.w+12,rp2.h+12,'#1d5f4a'); c.globalAlpha=1;
     panel(c,rp2.x,rp2.y,rp2.w,rp2.h,'#176d4e');
     text(c,'DROP HERE TO SELL FOR '+price+' PEARLS',W/2,rp2.y+16,10,'#dfffe8','center');
-  
+    G.dropZones=null;
     return;
   }
 
@@ -2960,15 +3024,19 @@ function drawUI(c){
      TANK LEANS line (which we hide meanwhile) so nothing overlaps */
   if(G.drag){
     var hs=SPECIES[G.drag.sp];
-    var hname = (hs ? hs.name : '?') + '  L' + (G.drag.rank+1);
+    var hname = (hs ? hs.name : '?');
+    var hlvl = 'LEVEL '+(G.drag.rank+1);
     var kindTxt='', kindCol='#9fe8dc';
-    if(isFinalForm(G.drag.sp)){ kindTxt='FINAL FORM'; kindCol='#c8a44e'; }
-    else if(hs && hs.chimera){ kindTxt='CHIMERA'; kindCol=SIGNAL.chimera; }
-    else if(hs && hs.mutantOf){ kindTxt='MUTANT'; kindCol=SIGNAL.unstable; }
-    var bw4=Math.max(220, hname.length*ts(11)+40);
-    panel(c, W/2-bw4/2, 46, bw4, 30, 'rgba(6,26,34,0.9)');
-    text(c, hname, W/2, 54, 11, speciesTint(hs,true), 'center');
-    if(kindTxt){ panel(c, W/2-bw4/2, 78, bw4, 18, 'rgba(6,26,34,0.7)'); text(c, kindTxt, W/2, 82, 6, kindCol, 'center'); }
+    if(isFinalForm(G.drag.sp)){ kindTxt=' - FINAL FORM'; kindCol='#c8a44e'; }
+    else if(hs && hs.chimera){ kindTxt=' - CHIMERA'; kindCol=SIGNAL.chimera; }
+    else if(hs && hs.mutantOf){ kindTxt=' - MUTANT'; kindCol=SIGNAL.unstable; }
+    /* a big, bright banner across the top of the tank - name + level, impossible to miss */
+    var full = hname + '   ' + hlvl + kindTxt;
+    var bw5 = Math.min(W-40, full.length*ts(12)+40);
+    panel(c, W/2-bw5/2, 46, bw5, 34, 'rgba(4,20,28,0.92)');
+    rp(c, W/2-bw5/2, 46, bw5, 3, kindCol);
+    text(c, hname, W/2-6, 56, 12, speciesTint(hs,true), 'right');
+    text(c, '  '+hlvl+kindTxt, W/2-6, 58, 9, kindCol, 'left');
   }
 
   /* a small badge above the bar, not a slab over the whole tank */
@@ -3126,12 +3194,13 @@ function drawMenu(c){
 
   var bw=300, bx=W/2-bw/2;
   var items=[
-    {k:'cont',  y:140, h:48, label: hasSave()?'CONTINUE':'START', big:true},
-    {k:'newg',  y:200, h:38, label:'NEW GAME'},
-    {k:'museum',y:258, h:38, label:'MUSEUM'},
-    {k:'awards',y:302, h:38, label:'AWARDS'},
-    {k:'shop',  y:346, h:38, label:'STAR SHOP'},
-    {k:'board', y:390, h:38, label:'LEADERBOARD'}
+    {k:'cont',   y:120, h:44, label: hasSave()?'CONTINUE':'START', big:true},
+    {k:'newg',   y:174, h:34, label:'NEW GAME'},
+    {k:'showcase',y:214, h:34, label:'\u2605 SHOWCASE TANK'},
+    {k:'museum', y:254, h:34, label:'MUSEUM'},
+    {k:'awards', y:294, h:34, label:'AWARDS'},
+    {k:'shop',   y:334, h:34, label:'STAR SHOP'},
+    {k:'board',  y:374, h:34, label:'LEADERBOARD'}
   ];
   BTN={};
   for(var i=0;i<items.length;i++){
@@ -3157,6 +3226,40 @@ function drawMenu(c){
   text(c,VERSION,W-16,H-22,8,'rgba(160,220,230,0.6)','right');
   if(G.name) text(c,G.name.toUpperCase()+'   SPECIES '+speciesCount()+'/'+SPECIES_ORDER.length,16,H-22,8,'rgba(160,220,230,0.6)');
   text(c,'\u2605 '+(G.stars||0)+' STARS',W-16,H-46,9,'#ffe08a','right');
+}
+function drawShowcase(c){
+  /* a calm, separate tank - trophies only, nothing to sell or merge here */
+  c.drawImage(SPR.bg,0,0);
+  c.drawImage(SPR.far,0,0);
+  if(SPR.rays) c.drawImage(SPR.rays,0,0);
+  c.fillStyle='rgba(6,20,28,0.35)'; c.fillRect(0,0,W,H);
+  text(c,'\u2605 YOUR SHOWCASE',W/2,16,13,'#ffe0a0','center');
+  if(G.showcase.length===0){
+    text(c,'YOUR FINEST FISH WILL LIVE HERE',W/2,H/2-16,9,'#bfe8d0','center');
+    text(c,'HOLD A FINAL FORM OVER THE BOTTOM BAR',W/2,H/2+8,8,'#9fc8c0','center');
+    text(c,'AND CHOOSE  \u2605 KEEP IN SHOWCASE  INSTEAD OF SELLING',W/2,H/2+28,8,'#9fc8c0','center');
+  } else {
+    text(c,G.showcase.length+' TROPHY FISH',W/2,38,7,'#9fe8dc','center');
+  }
+  /* each settled fish drifts gently */
+  for(var i=0;i<G.showcase.length;i++){
+    var z=G.showcase[i];
+    z.x += Math.sin(G.t*0.5+z.bob)*0.3*z.dir;
+    if(z.x<80){ z.x=80; z.dir=1; } if(z.x>W-80){ z.x=W-80; z.dir=-1; }
+    var by=z.y+Math.sin(G.t*1.1+z.bob)*6;
+    var frames=fishFrames(z.sp,z.rank);
+    var img=frames[Math.floor(G.t*3+z.bob)%frames.length]||frames[0];
+    var gl=fishGlow(z.sp);
+    if(gl){ c.globalAlpha=0.5; c.drawImage(gl,Math.round(z.x-gl.width/2),Math.round(by-gl.height/2)); c.globalAlpha=1; }
+    c.save();
+    if(z.dir<0){ c.translate(Math.round(z.x),0); c.scale(-1,1); c.drawImage(img,Math.round(-img.width/2),Math.round(by-img.height/2)); }
+    else c.drawImage(img,Math.round(z.x-img.width/2),Math.round(by-img.height/2));
+    c.restore();
+    /* a tiny gold crown marks each as a final form */
+    rp(c,Math.round(z.x)-6,Math.round(by-img.height/2)-8,12,2,'#c8a44e');
+  }
+  panel(c,W/2-80,H-44,160,32,'#175f6d'); text(c,'BACK',W/2,H-34,9,'#eafffb','center');
+  BTN={back:{x:W/2-80,y:H-44,w:160,h:32}};
 }
 function drawAudioPanel(c){
   c.fillStyle='rgba(4,18,26,0.94)'; c.fillRect(0,0,W,H);
@@ -3509,17 +3612,21 @@ function drawCodexCard(c){
   text(c,tag,tx,92,8,'#7fbfc8');
   if(known) wrapText(c,sp.desc,tx,118,8,'#bfe8f0',colW,20);
   else text(c,'NOT DISCOVERED YET',tx,118,8,'#456770');
-  text(c,'HOW TO GET IT',tx,H-150,8,'#7fbfc8');
-  wrapText(c,codexHint(id),tx,H-126,8,'#ffd400',colW,20);
-  if(known && isFinalForm(id)) text(c,'\u2605 FINAL FORM - THE TOP OF ITS LINE',tx,H-166,7,'#c8a44e');
-  /* chimeras need the whole recipe spelled out - it is the deepest, least obvious path */
+  /* the full chimera recipe goes UP in the roomy description area, not down by the
+     BACK button (where it used to overlap it). */
+  var hintY = H-150;
   if(SPECIES[id].chimera){
+    text(c,'THE CHIMERA PATH',tx,150,8,'#7fbfc8');
     wrapText(c,'STEP 1: MAKE TWO MUTANTS (MERGE MISMATCHED RANKS, 25%). STEP 2: GROW EACH TO L3. STEP 3: DRAG ONE ONTO THE OTHER - 30% A CHIMERA, ELSE THEY RESET.',
-             tx,H-96,7,'#9fe8dc',colW,17);
+             tx,174,8,'#9fe8dc',colW,20);
   }
-  panel(c,W/2-80,H-52,160,30,'#175f6d');
-  text(c,'BACK',W/2,H-43,10,'#eafffb','center');
-  BTN={back:{x:W/2-80,y:H-52,w:160,h:30}};
+  if(known && isFinalForm(id)) text(c,'\u2605 FINAL FORM - THE TOP OF ITS LINE',tx,H-172,7,'#c8a44e');
+  text(c,'HOW TO GET IT',tx,H-148,8,'#7fbfc8');
+  wrapText(c,codexHint(id),tx,H-124,8,'#ffd400',colW,20);
+  /* BACK sits in its own strip at the very bottom, clear of the text above */
+  panel(c,W/2-80,H-40,160,28,'#175f6d');
+  text(c,'BACK',W/2,H-32,9,'#eafffb','center');
+  BTN={back:{x:W/2-80,y:H-40,w:160,h:28}};
 }
 function drawCodex(c){
   drawScene(c);
@@ -3552,11 +3659,13 @@ function drawCodex(c){
 function render(){
   var c=ctx;
   c.clearRect(0,0,W,H);
-  if(G.scene==='menu'){ drawMenu(c); return; }
+  if(G.scene==='menu'){
+    drawMenu(c); return; }
   if(G.scene==='summary'){ drawSummary(c); return; }
   if(G.scene==='awards'){ drawAwards(c); return; }
   if(G.scene==='shop'){ drawShop(c); return; }
   if(G.scene==='museum'){ drawMuseum(c); return; }
+  if(G.scene==='showcase'){ drawShowcase(c); return; }
   if(G.scene==='patron'){ drawPatron(c); return; }
   if(G.scene==='board'){ drawBoard(c); return; }
   if(G.scene==='codex'){ drawCodex(c); return; }
@@ -3604,6 +3713,7 @@ function onDown(e){
   var p=toLogical(e);
   G.ptr.x=p.x; G.ptr.y=p.y;
   if(G.scene==='menu'){
+    if(BTN.showcase && hit(BTN.showcase,p)){ G.scene='showcase'; return; }
     if(G.confirmNew){
       if(hit(BTN.yes,p)){ G.confirmNew=false; newGame(); G.scene='tank'; }
       else if(hit(BTN.no,p)) G.confirmNew=false;
@@ -3640,6 +3750,7 @@ function onDown(e){
     }
     return;
   }
+  if(G.scene==='showcase'){ if(hit(BTN.back,p)){ G.scene='menu'; return; } return; }
   if(G.scene==='patron'){
     if(hit(BTN.back,p)){ G.scene='museum'; return; }
     for(var fk in BTN){ if(fk.indexOf('fund')===0 && hit(BTN[fk],p)){ fundPlaque(BTN[fk]._id); return; } }
@@ -3757,6 +3868,7 @@ function onDown(e){
   G.feedOpen=false; G.questsOpen=false;
   var f=fishAt(p);
   if(f && f.age>=1){ G.drag=f; f.held=true; G.dragOff.x=f.x-p.x; G.dragOff.y=f.y-p.y; }
+  else if(f){ feedBaby(f); }        // tap a baby to feed it directly - a few taps grow it up
   else dropFood(p.x,p.y);
 }
 function onMove(e){
@@ -3770,7 +3882,17 @@ function onMove(e){
 function onUp(){
   if(!G.drag) return;
   var d=G.drag; d.held=false; G.drag=null;
-  if(G.ptr.y>H-68){ releaseFish(d); return; }      // dropped on the bar = let it go
+  if(G.ptr.y>H-68){
+    /* final form? honour the two-zone choice: left = settle, right = sell */
+    if(isFinalForm(d.sp) && G.dropZones){
+      if(G.ptr.x < G.dropZones.settle.x + G.dropZones.settle.w) settleFish(d);
+      else releaseFish(d);
+    } else {
+      releaseFish(d);
+    }
+    G.dropZones=null;
+    return;
+  }
   var best=null,bd=1e9;
   for(var i=0;i<G.fish.length;i++){
     var f=G.fish[i];
@@ -3796,7 +3918,7 @@ function onUp(){
    BOOT + LOOP
    ============================================================ */
 function newGame(){
-  G.pearls=60; G.stars=0; G.discovered={}; G.unlocked={}; G.achs={}; G.badges={}; G.patron={};
+  G.pearls=60; G.stars=0; G.discovered={}; G.unlocked={}; G.achs={}; G.badges={}; G.patron={}; G.showcase=[];
   G.owned={tint_none:true,frame_none:true,orn_none:true,skin_none:true}; G.cosmetic={tint:'tint_none',frame:'frame_none',ornament:'orn_none',skin:'skin_none'};
   G.stats={merges:0,mutants:0,chimeras:0,released:0,fed:0};
   G.tips={}; G.tip=null; G.tipGap=0;
@@ -3889,7 +4011,7 @@ function askName(){
 }
 /* expose for the headless test harness */
 if(typeof window!=='undefined'){
-  window.__DG={G:G,get BTN(){return BTN;},setRenderTarget:function(nc){ cv=nc; ctx=nc.getContext('2d'); ctx.imageSmoothingEnabled=false; },tryResume:tryResume,bakeGlass:bakeGlass,PATRON:PATRON,patronDef:patronDef,fundPlaque:fundPlaque,collectionComplete:collectionComplete,get _lastFills(){return _glassFills;},audioReport:audioReport,audioTest:audioTest,speciesCount:speciesCount,discover:discover,get confirmBtns(){return G.confirmBtns;},isFinalForm:isFinalForm,SPECIES:SPECIES,TIPS:TIPS,COSMETICS:COSMETICS,sellPrice:sellPrice,cosmeticDef:cosmeticDef,equipped:equipped,addStars:addStars,BADGES:BADGES,badgeDef:badgeDef,badgeStat:badgeStat,checkBadges:checkBadges,ts:ts,UI_MIN:UI_MIN,codexPages:codexPages,CODEX_PER_PAGE:CODEX_PER_PAGE,codexCell:codexCell,runAway:runAway,AWAY_CAP:AWAY_CAP,sessionStart:sessionStart,sessionEmpty:sessionEmpty,tipTick:tipTick,dismissTip:dismissTip,tipDef:tipDef,SPR:SPR,RIPEN:RIPEN,BIOMES:BIOMES,setBiome:setBiome,biomeDef:biomeDef,bakeScene:bakeScene,AU:AU,audioInit:audioInit,armAudio:armAudio,audioReady:audioReady,unlockSession:unlockSession,audioMute:audioMute,musicTick:musicTick,sfx:sfx,musicStep:musicStep,ACHS:ACHS,LOCKED_BASE:LOCKED_BASE,availableBase:availableBase,newGame:newGame,checkAchs:checkAchs,bumpStat:bumpStat,LB:LB,lbVisible:lbVisible,hasSave:hasSave,fishFrames:fishFrames,fishGlow:fishGlow,SIGNAL:SIGNAL,releaseFish:releaseFish,EVENT_T:EVENT_T,tankFull:tankFull,RANK_O2:RANK_O2,DECOR:DECOR,DECOR_MAX:DECOR_MAX,QUEST_POOL:QUEST_POOL,placeDecor:placeDecor,removeDecor:removeDecor,recalcEnv:recalcEnv,questEvent:questEvent,fillQuests:fillQuests,questDef:questDef,save:save,update:update,render:render,tryMerge:tryMerge,mergeKind:mergeKind,CHIMERA:CHIMERA,CHIMERA_CHANCE:CHIMERA_CHANCE,chimeraKey:chimeraKey,
+  window.__DG={G:G,get BTN(){return BTN;},setRenderTarget:function(nc){ cv=nc; ctx=nc.getContext('2d'); ctx.imageSmoothingEnabled=false; },tryResume:tryResume,bakeGlass:bakeGlass,PATRON:PATRON,patronDef:patronDef,fundPlaque:fundPlaque,collectionComplete:collectionComplete,get _lastFills(){return _glassFills;},audioReport:audioReport,audioTest:audioTest,speciesCount:speciesCount,discover:discover,get confirmBtns(){return G.confirmBtns;},isFinalForm:isFinalForm,SPECIES:SPECIES,TIPS:TIPS,COSMETICS:COSMETICS,sellPrice:sellPrice,cosmeticDef:cosmeticDef,equipped:equipped,addStars:addStars,BADGES:BADGES,badgeDef:badgeDef,badgeStat:badgeStat,checkBadges:checkBadges,ts:ts,UI_MIN:UI_MIN,codexPages:codexPages,CODEX_PER_PAGE:CODEX_PER_PAGE,codexCell:codexCell,runAway:runAway,AWAY_CAP:AWAY_CAP,sessionStart:sessionStart,sessionEmpty:sessionEmpty,tipTick:tipTick,dismissTip:dismissTip,tipDef:tipDef,SPR:SPR,RIPEN:RIPEN,BIOMES:BIOMES,setBiome:setBiome,biomeDef:biomeDef,bakeScene:bakeScene,AU:AU,audioInit:audioInit,armAudio:armAudio,audioReady:audioReady,unlockSession:unlockSession,audioMute:audioMute,musicTick:musicTick,sfx:sfx,musicStep:musicStep,ACHS:ACHS,LOCKED_BASE:LOCKED_BASE,availableBase:availableBase,newGame:newGame,checkAchs:checkAchs,bumpStat:bumpStat,LB:LB,lbVisible:lbVisible,hasSave:hasSave,fishFrames:fishFrames,fishGlow:fishGlow,SIGNAL:SIGNAL,releaseFish:releaseFish,settleFish:settleFish,EVENT_T:EVENT_T,tankFull:tankFull,RANK_O2:RANK_O2,DECOR:DECOR,DECOR_MAX:DECOR_MAX,QUEST_POOL:QUEST_POOL,placeDecor:placeDecor,removeDecor:removeDecor,recalcEnv:recalcEnv,questEvent:questEvent,fillQuests:fillQuests,questDef:questDef,save:save,update:update,render:render,feedBaby:feedBaby,tryMerge:tryMerge,mergeKind:mergeKind,CHIMERA:CHIMERA,CHIMERA_CHANCE:CHIMERA_CHANCE,chimeraKey:chimeraKey,
     makeFish:makeFish,spawnFry:spawnFry,boot:boot,recalcOxygen:recalcOxygen,
     RANK_LEN:RANK_LEN,creatureCanvasSize:creatureCanvasSize,drawCreature:drawCreature,
     SPECIES_ORDER:SPECIES_ORDER,addPearls:addPearls,PEARL_CAP:PEARL_CAP,load:load,FOODS:FOODS};
