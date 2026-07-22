@@ -50,7 +50,7 @@
    Phase 1: core loop (swim / feed / grow / breed / merge / evolve)
    ============================================================ */
 
-var VERSION = 'v6.4';
+var VERSION = 'v6.5';
 var W = 960, H = 540;
 var SAVE_KEY = 'deepgarden_save_v1';
 var FLOOR = 476;          // substrate top
@@ -974,9 +974,12 @@ var TIPS = [
   { id:'release', at:null,    text:'DRAG A FISH TO THE GREEN BAR TO SELL IT',
     sub:'YOU GET PEARLS, AND IT STAYS IN YOUR CODEX',
     when:function(){ return G.oxyUse > G.oxyCap*0.8; } },
-  { id:'final',  at:null,     text:'THIS ONE IS A FINAL FORM - IT WONT EVOLVE FURTHER',
-    sub:'ENJOY IT, OR SELL IT ON THE GREEN BAR TO MAKE ROOM',
+  { id:'final',  at:null,     text:'TWO FINAL FORMS AT L3 MAKE AN ELDER',
+    sub:'RAISE A SECOND ONE TO L3, THEN DRAG THEM TOGETHER',
     when:function(){ return anyFish(function(f){ return f.age>=1 && f.rank===2 && isFinalForm(f.sp); }); } },
+  { id:'elder',  at:null,     text:'AN ELDER IS THE TOP OF ITS KIND',
+    sub:'BIGGER, SCARRED AND CROWNED - AND IT BREATHES FOR TWO',
+    when:function(){ return anyFish(function(f){ return f.rank>=3; }); } },
   { id:'museum', at:null,     text:'THE MENU HAS A MUSEUM OF THE WHOLE TREE OF LIFE',
     sub:'EVERY SPECIES, HOW EACH ONE IS MADE',
     when:function(){ return speciesCount()>=8; } },
@@ -1012,8 +1015,8 @@ function dismissTip(){
 }
 
 /* ---------- 9. RANKS ---------- */
-var RANK_LEN = [50,80,116];
-var RANK_O2  = [6,10,17];
+var RANK_LEN = [50,80,116,148];      /* L4 = the elder form */
+var RANK_O2  = [6,10,17,26];         /* an elder breathes for two */
 var AGE_STAGE = ['FRY','JUVENILE','ADULT'];
 
 /* ============================================================
@@ -1049,7 +1052,8 @@ function creatureExtent(sp){
 }
 function creatureCanvasSize(sp,rank){
   var L=RANK_LEN[rank], e=creatureExtent(sp);
-  return { w: Math.round(e.hx*2*L)+8, h: Math.round(e.hy*2*L)+8 };
+  var pad = rank>=3 ? 26 : 8;        // an elder wears a crown and trails filaments
+  return { w: Math.round(e.hx*2*L)+pad, h: Math.round(e.hy*2*L)+pad };
 }
 function extrasOf(sp){
   if(Array.isArray(sp.extra)) return sp.extra;
@@ -1513,6 +1517,45 @@ function drawCreature(c,sp,rank,frame){
   var EX=extrasOf(sp);
   for(var e=0;e<EX.length;e++) drawExtra(EX[e]);
 
+  /* --- the marks of an elder: only rank 3 wears these --- */
+  if(rank>=3){
+    var gold=['#7a5a1e','#b8891f','#e8c35a','#fff0b8'];
+    /* a crown of spines over the brow */
+    var crx=cx+Math.round(rx*0.30), cry=by-ry;
+    for(var ci=0;ci<5;ci++){
+      var cxp=crx-Math.round(ci*rx*0.13), chh=6+((ci%2)?3:6);
+      for(var cj=0;cj<chh;cj++){
+        var cw=Math.max(1,Math.round((chh-cj)/2));
+        rp(c, cxp-cw, cry-cj-1, cw*2, 1, cj>chh-3?gold[3]:(cj>chh*0.4?gold[2]:gold[1]));
+      }
+      px(c,cxp,cry-chh-1,gold[3]);
+    }
+    rp(c, crx-Math.round(rx*0.56), cry-1, Math.round(rx*0.60), 2, gold[1]);
+    rp(c, crx-Math.round(rx*0.56), cry-1, Math.round(rx*0.40), 1, gold[2]);
+    /* old scars across the flank */
+    for(var si=0;si<3;si++){
+      var sxx=cx-Math.round(rx*(0.10+si*0.22)), syy=by-Math.round(ry*0.30)+si*Math.round(ry*0.32);
+      for(var sj2=0;sj2<Math.max(3,Math.round(L*0.06));sj2++){
+        px(c, sxx+sj2, syy+Math.round(sj2*0.5), ramp(7));
+        px(c, sxx+sj2, syy+Math.round(sj2*0.5)+1, ramp(2));
+      }
+    }
+    /* filaments trailing from the tail, drifting with the frame */
+    for(var fi=0;fi<3;fi++){
+      var fy=cy+Math.round((fi-1)*ry*0.42), fx=x0-Math.round(L*0.16);
+      for(var fj=0;fj<Math.round(L*0.11);fj++){
+        var fw=Math.round(Math.sin(ph*1.4+fj*0.32+fi)*2.2);
+        px(c, fx-fj, fy+fw+Math.round(fj*0.10), fj%3===0?ramp(6):ramp(4));
+      }
+    }
+    /* barbels at the jaw */
+    for(var bi=0;bi<2;bi++){
+      var bxx=cx+Math.round(rx*0.78), byy3=by+Math.round(ry*(0.18+bi*0.20));
+      for(var bj2=0;bj2<Math.round(L*0.10);bj2++)
+        px(c, bxx+bj2, byy3+Math.round(Math.sin(ph+bj2*0.3+bi)*1.6)+Math.round(bj2*0.28), ramp(5));
+    }
+  }
+
   /* --- eye --- */
   var ex=Math.round(cx+rx*0.58), ey=Math.round(by-ry*0.22);
   if(sp.body==='snail'){ ex=Math.round(cx+rx*0.85); ey=Math.round(by+ry*0.45); }
@@ -1583,7 +1626,7 @@ var SPR = { fish:{}, glow:{}, ring:{}, decor:{}, food:{}, bg:null, far:null, mid
 function fishFrames(id,rank){
   var sp=SPECIES[id];
   if(!sp){ sp=SPECIES.guppy; id='guppy'; }              // render must never crash
-  rank=Math.max(0,Math.min(2,rank|0));
+  rank=Math.max(0,Math.min(RANK_LEN.length-1,rank|0));
   var byId=SPR.fish[id] || (SPR.fish[id]=[]);
   if(byId[rank]) return byId[rank];
   var arr=[], sz=creatureCanvasSize(sp,rank);
@@ -1960,7 +2003,7 @@ function bakeRings(){
   var kinds=['ok','unstable','chimera'];
   for(var k=0;k<kinds.length;k++){
     SPR.ring[kinds[k]]=[];
-    for(var r=0;r<3;r++){
+    for(var r=0;r<RANK_LEN.length;r++){
       SPR.ring[kinds[k]].push(makeRing(Math.round(RANK_LEN[r]*0.78),3,SIGNAL[kinds[k]],10));
     }
   }
@@ -2406,7 +2449,7 @@ function load(){
     for(var si=0;si<d.showcase.length && si<60;si++){
       var sc=d.showcase[si];
       if(sc && SPECIES[sc.s||sc.sp]){
-        G.showcase.push({ sp:sc.s||sc.sp, rank:num(sc.r!==undefined?sc.r:sc.rank,2,0,2),
+        G.showcase.push({ sp:sc.s||sc.sp, rank:num(sc.r!==undefined?sc.r:sc.rank,2,0,3),
           x:num(sc.x,480,20,940), y:num(sc.y,240,120,380), dir:sc.dir===-1?-1:1,
           bob:gameRnd()*6.28, name:(SPECIES[sc.s||sc.sp].name), custom:(typeof sc.nm==='string'?sc.nm.slice(0,12):'') });
       }
@@ -2460,7 +2503,7 @@ function load(){
     for(var i=0;i<d.fish.length && i<80;i++){
       var f=d.fish[i];
       if(!f||!SPECIES[f.s]) continue;                    // unknown skin -> drop
-      var nf=makeFish(f.s, num(f.r,0,0,2)|0, num(f.x,W/2,20,W-20), num(f.y,240,SURFACE+10,FLOOR-10));
+      var nf=makeFish(f.s, num(f.r,0,0,3)|0, num(f.x,W/2,20,W-20), num(f.y,240,SURFACE+10,FLOOR-10));
       nf.age = num(f.a,0,0,1);
       nf.ripe = num(f.rp,RIPEN,0,RIPEN);
       nf.ready = (nf.age>=1 && nf.ripe<=0);
@@ -2558,11 +2601,12 @@ function mergeKind(a,b){
   if(a.sp!==b.sp) return null;
   if(a.rank===b.rank){
     if(a.rank<2) return 'rank';
-    /* two L3 of the same species: only 'evolve' if there is somewhere to evolve TO.
-       A final form (spire shell, an apex chimera) has an empty evolveTo - merging it
-       used to silently eat one fish for nothing. That is now its own kind: 'apex'. */
+    if(a.rank>=3) return 'apex';        // an elder is the very top - nothing above it
+    /* two L3 of the same species: 'evolve' if the branch continues. If it does not
+       (a final form, a chimera), the pair becomes ONE ELDER of that same species -
+       so the 30 dead-end species finally have somewhere to go. */
     var branches=spA.evolveTo && Object.keys(spA.evolveTo).length;
-    return branches ? 'evolve' : 'apex';
+    return branches ? 'evolve' : 'elder';
   }
   return 'unstable';
 }
@@ -2570,8 +2614,8 @@ function tryMerge(a,b){
   var kind=mergeKind(a,b);
   if(!kind) return false;
   if(kind==='apex'){
-    /* the top of a branch. Nothing to gain by merging - so we DON'T, and we say so. */
-    toast('THIS IS A FINAL FORM - IT HAS NOWHERE LEFT TO EVOLVE');
+    /* an elder already is the top. We refuse rather than silently eat a fish. */
+    toast('AN ELDER IS THE VERY TOP - NOTHING GROWS BEYOND IT');
     return false;
   }
   var sp=SPECIES[a.sp];
@@ -2623,6 +2667,13 @@ function tryMerge(a,b){
       coins=60; isNew=discover(tgt);
       title=isNew?'NEW SPECIES':'EVOLVED'; sub=SPECIES[tgt].name;
     }
+  } else if(kind==='elder'){
+    /* two grown finals of the same kind become ONE elder of that kind. Not a new
+       species - a fourth stage of one you already own, so the 46 ceiling holds. */
+    res=makeFish(spA,3,x,y); res.diet=diet; res.age=1;
+    coins=90;
+    title='ELDER'; sub=SPECIES[spA].name;
+    G.stats.elders=(G.stats.elders||0)+1;
   } else { /* unstable: mismatched ranks */
     if(gameRnd()<0.25 && sp.mutant){
       res=makeFish(sp.mutant,0,x,y); res.age=1;
@@ -2641,6 +2692,7 @@ function tryMerge(a,b){
   if(kind==='evolve' && title) questEvent('evolve',1);
   if(title==='MUTANT!'){ questEvent('mutant',1); bumpStat('mutants',1); sfx('mutant'); }
   if(title==='CHIMERA!'){ questEvent('cross',1); bumpStat('chimeras',1); sfx('chimera'); }
+  if(title==='ELDER'){ questEvent('elder',1); sfx('evolve'); }
   if(res.rank===2) questEvent('l3',1);
   G.fish.push(res);
   burst(x,y,title?30:12,title?'#b8f6ff':'#8fd8c8');
@@ -2657,6 +2709,7 @@ function sellPrice(f){
   var sp=SPECIES[f.sp];
   var p = 4 + f.rank*6 + (sp.base?0:6) + ((sp.mutantOf||sp.chimera)?10:0);
   if(f.rank===2 && isFinalForm(f.sp)) p += 12;   // a final form is worth keeping around for
+  if(f.rank>=3) p += 40;                         // an elder took two grown finals to make
   return p;
 }
 function settleFish(f){
@@ -3185,14 +3238,14 @@ function drawFish(c,f,alpha){
   if(G.drag && G.drag!==f){
     var kind=mergeKind(G.drag,f);
     var ly=Math.round(f.y-RANK_LEN[f.rank]*0.78)-16;
-    /* two same-species L3 finals: honest grey "no further", never a green promise */
-    if(!kind && G.drag.sp===f.sp && G.drag.rank===2 && f.rank===2 && isFinalForm(f.sp)){
+    /* an elder is the true top: honest grey, never a green promise */
+    if(kind==='apex'){
       c.globalAlpha=0.5+Math.sin(G.t*5)*0.2;
       var rr=Math.round(RANK_LEN[f.rank]*0.6);
       for(var da=0;da<16;da++){ var an=da/16*6.28; if(da%2) continue;
         px(c,Math.round(f.x+Math.cos(an)*rr),Math.round(f.y+Math.sin(an)*rr),'#9aa4b2'); }
       c.globalAlpha=1;
-      text(c,'FINAL FORM',f.x,ly,8,'#c8a44e','center');
+      text(c,'NOTHING BEYOND AN ELDER',f.x,ly,8,'#c8a44e','center');
     } else if(kind){
       var key = kind==='chimera' ? 'chimera' : (kind==='unstable' ? 'unstable' : 'ok');
       var rimg = SPR.ring[key] ? SPR.ring[key][f.rank] : null;
@@ -3203,6 +3256,7 @@ function drawFish(c,f,alpha){
       }
       if(kind==='chimera')      text(c,'30% CHIMERA',f.x,ly,9,SIGNAL.chimera,'center');
       else if(kind==='unstable')text(c,'25% MUTANT',f.x,ly,8,SIGNAL.unstable,'center');
+      else if(kind==='elder')   text(c,'\u2605 MAKE AN ELDER',f.x,ly,9,'#ffd98a','center');
     }
   }
 }
@@ -4088,7 +4142,9 @@ function drawCodexCard(c){
     wrapText(c,'STEP 1: MAKE TWO MUTANTS (MERGE MISMATCHED RANKS, 25%). STEP 2: GROW EACH TO L3. STEP 3: DRAG ONE ONTO THE OTHER - 30% A CHIMERA, ELSE THEY RESET.',
              tx,174,8,'#9fe8dc',colW,20);
   }
-  if(known && isFinalForm(id)) text(c,'\u2605 FINAL FORM - THE TOP OF ITS LINE',tx,H-172,7,'#c8a44e');
+  if(known && isFinalForm(id)){
+    text(c,'\u2605 FINAL FORM - TWO AT L3 MAKE AN ELDER',tx,H-172,7,'#c8a44e');
+  }
   text(c,'HOW TO GET IT',tx,H-148,8,'#7fbfc8');
   wrapText(c,codexHint(id),tx,H-124,8,'#ffd400',colW,20);
   /* BACK sits in its own strip at the very bottom, clear of the text above */
