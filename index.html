@@ -50,7 +50,7 @@
    Phase 1: core loop (swim / feed / grow / breed / merge / evolve)
    ============================================================ */
 
-var VERSION = 'v6.2';
+var VERSION = 'v6.4';
 var W = 960, H = 540;
 var SAVE_KEY = 'deepgarden_save_v1';
 var FLOOR = 476;          // substrate top
@@ -1068,6 +1068,28 @@ function bodyDims(sp,L){
     default:       return [L*0.42,L*0.26];
   }
 }
+/* Rays inside a fin: thin lines fanning from the fin root to its edge. They stay
+   strictly inside the triangle already drawn, so the sprite bbox never grows. */
+function finRays(c,xr,yr,len,half,off,col,cnt,dir){
+  dir = dir||-1;                       // -1 = fan to the left (tail), +1 = to the right
+  len = Math.max(2,Math.round(len)); cnt=Math.max(2,cnt|0);
+  for(var r=0;r<cnt;r++){
+    var t=(cnt===1)?0.5:r/(cnt-1);
+    var dy=Math.round((t*2-1)*half+off);
+    var steps=Math.round(len*0.80), prevY=null;
+    for(var s2=1;s2<steps;s2++){
+      var u=s2/steps;
+      var yNow=Math.round(yr+dy*u), xNow=Math.round(xr+dir*s2);
+      /* fill the vertical gap to the previous step: a bare diagonal of single pixels
+         reads as a dotted line, not a fin ray */
+      if(prevY===null) prevY=yNow;
+      var y1=Math.min(prevY,yNow), y2=Math.max(prevY,yNow);
+      rp(c, xNow, y1, 1, (y2-y1)+1, col);
+      prevY=yNow;
+    }
+  }
+}
+
 function drawCreature(c,sp,rank,frame){
   var L = RANK_LEN[rank];
   var sz = creatureCanvasSize(sp,rank);
@@ -1081,6 +1103,188 @@ function drawCreature(c,sp,rank,frame){
   var x0 = Math.round(cx-rx);   // tail root
   var detail = rank;            // higher rank = richer
 
+  /* Extra shading steps derived from this species' own palette. Shadows cool,
+     lights warm - a flat darkening of one hex looks dead (PIXEL_ART_SPEC 15.3). */
+  var SH = {
+    edge : coolHex(P[0],0.22),
+    deep : coolHex(mixHex(P[0],P[1],0.40),0.30),
+    base : P[1],
+    lit  : P[2],
+    hi   : warmHex(P[3],0.22),
+    acc  : P[4]
+  };
+  /* A FIXED 8-step ramp, built once per sprite. Every detail below picks a step from
+     it instead of blending freely - a limited palette is what keeps this pixel art
+     and not a smudge (PIXEL_ART_SPEC 15.3). */
+  var RAMP = [
+    SH.edge,
+    mixHex(SH.edge,SH.base,0.42),
+    mixHex(SH.edge,SH.base,0.74),
+    SH.base,
+    mixHex(SH.base,SH.lit,0.50),
+    SH.lit,
+    mixHex(SH.lit,SH.hi,0.50),
+    SH.hi
+  ];
+  function ramp(i){ return RAMP[i<0?0:(i>7?7:i)]; }
+
+  /* The "expensive" pass: counter-shading, scales, gill cover. Everything is clipped
+     to the body ellipse, so the sprite never grows past its baked canvas. */
+  function bodyDetail(bcx,bcy,brx,bry){
+    var yy,xx,w2;
+    /* 1. counter-shading - dark back, pale belly, gentle so volume survives */
+    for(yy=-bry; yy<=bry; yy++){
+      w2 = Math.floor(brx*Math.sqrt(Math.max(0,1-(yy*yy)/(bry*bry))));
+      if(w2<1) continue;
+      var f=(yy+bry)/(2*bry);
+      if(f<0.11)      rp(c,bcx-w2,bcy+yy,2*w2+1,1, ramp(3));
+      else if(f>0.80) rp(c,bcx-w2,bcy+yy,2*w2+1,1, ramp(6));
+    }
+    /* 2. scale rows. Each scale takes its step from WHERE IT SITS relative to the
+          scene light (top-left), so texture never flattens the volume. */
+    if(rank>=1){
+      var sw=Math.max(3,Math.round(L*0.040)), sh=Math.max(2,Math.round(L*0.032)), row=0;
+      for(yy=-bry+sh; yy<bry-sh; yy+=sh, row++){
+        w2 = Math.floor(brx*Math.sqrt(Math.max(0,1-(yy*yy)/(bry*bry))));
+        if(w2<sw+2) continue;
+        var offs=(row%2)?Math.round(sw/2):0;
+        for(xx=-w2+2+offs; xx<w2-sw-1; xx+=sw){
+          var t2 = 1 - ((xx/brx)*0.5 + (yy/bry)*0.5 + 1)/2;   // 1 = up-left, 0 = down-right
+          var lvl = t2>0.74 ? 7 : (t2>0.50 ? 6 : (t2>0.28 ? 5 : 4));
+          var v = rnd();
+          rp(c, bcx+xx, bcy+yy,   Math.max(1,sw-1), 1, ramp(lvl - (v<0.28?2:1)));
+          rp(c, bcx+xx, bcy+yy-1, Math.max(1,sw-2), 1, ramp(lvl));
+        }
+      }
+    }
+    /* 3. specular sheen up-left, dithered at the rim so there is no plastic edge */
+    var hrx=Math.round(brx*0.48), hry=Math.round(bry*0.44);
+    var hcx=bcx-Math.round(brx*0.18), hcy=bcy-Math.round(bry*0.34);
+    /* squared comparisons only - no sqrt per pixel, so the bake stays cheap */
+    for(yy=-hry; yy<=hry; yy++){
+      var ny=(yy*yy)/(hry*hry);
+      var hw=Math.floor(hrx*Math.sqrt(Math.max(0,1-ny)));
+      var yAbs=hcy+yy-bcy;
+      var bw=Math.floor(brx*Math.sqrt(Math.max(0,1-(yAbs*yAbs)/(bry*bry))));
+      for(xx=-hw; xx<=hw; xx++){
+        if(Math.abs(hcx+xx-bcx)>bw-1) continue;
+        var e2=(xx*xx)/(hrx*hrx)+ny;                  // squared edge distance
+        if(e2>0.49 && rnd()<0.55) continue;           // 0.70^2
+        px(c, hcx+xx, hcy+yy, ramp(e2>0.3025?6:7));   // 0.55^2
+      }
+    }
+    /* 4. lateral line - the sensory seam every real fish has, dotted along the flank */
+    var ly2=Math.round(bry*0.06);
+    for(xx=-Math.round(brx*0.72); xx<Math.round(brx*0.80); xx+=3){
+      var wl=Math.floor(brx*Math.sqrt(Math.max(0,1-(ly2*ly2)/(bry*bry))));
+      if(Math.abs(xx)>wl-2) continue;
+      px(c, bcx+xx, bcy+ly2 - Math.round((xx*xx)/(brx*brx)*bry*0.22), ramp(1));
+    }
+    /* 5. dorsal ridge: a dark spine along the very top */
+    for(xx=-Math.round(brx*0.86); xx<Math.round(brx*0.86); xx++){
+      var tp=Math.round(bry*Math.sqrt(Math.max(0,1-(xx*xx)/(brx*brx))));
+      if(tp<2) continue;
+      px(c, bcx+xx, bcy-tp+1, ramp(2));
+    }
+    /* 6. rim light: the scene light comes from the top-left, so the upper-left edge
+          catches a one-pixel warm highlight (template 4: contre-jour on the hero) */
+    for(xx=-Math.round(brx*0.92); xx<0; xx++){
+      var tp2=Math.round(bry*Math.sqrt(Math.max(0,1-(xx*xx)/(brx*brx))));
+      if(tp2<2) continue;
+      px(c, bcx+xx, bcy-tp2+2, ramp(7));
+    }
+    /* 7. jaw line and nostril - small, but they turn a blob into a head */
+    var jx=bcx+Math.round(brx*0.70), jy=bcy+Math.round(bry*0.16);
+    rp(c, jx, jy, Math.max(2,Math.round(brx*0.18)), 1, ramp(2));
+    px(c, bcx+Math.round(brx*0.62), bcy-Math.round(bry*0.10), ramp(1));
+    /* --- placeholder marker --- */
+  /* 3. gill cover: a curved seam behind the head with a lit edge */
+    var gx=bcx+Math.round(brx*0.44), gh=Math.round(bry*0.72);
+    for(yy=-gh; yy<=gh; yy++){
+      var curve=Math.round((yy*yy)/(bry*bry)*brx*0.14);
+      px(c, gx-curve,   bcy+yy, ramp(2));
+      px(c, gx-curve+1, bcy+yy, ramp(6));
+    }
+  }
+
+  /* The same treatment for the four anatomies that are not fish: their own seams,
+     ribs and rings, plus one shared light source so nothing looks bolted on. */
+  function oddDetail(kind,bcx,bcy,brx,bry){
+    var i3,j3,rr3;
+    if(kind==='bell'){
+      /* radial ribs down the dome + a bright leading rim */
+      for(i3=-3;i3<=3;i3++){
+        var rxp=bcx+Math.round(i3*brx*0.26);
+        for(j3=0;j3<Math.round(bry*1.5);j3++){
+          var wj=Math.round(brx*Math.sqrt(Math.max(0,1-Math.pow(j3/(bry*1.6),2))));
+          if(Math.abs(rxp-bcx)>wj-1) break;
+          if(j3%2===0) px(c,rxp,bcy+j3-Math.round(bry*0.2), ramp(i3<0?6:2));
+        }
+      }
+      for(i3=-Math.round(brx*0.9);i3<0;i3++){
+        var tj=Math.round(bry*Math.sqrt(Math.max(0,1-(i3*i3)/(brx*brx))));
+        px(c,bcx+i3,bcy-tj+Math.round(bry*0.2), ramp(7));
+      }
+    } else if(kind==='snail'){
+      /* growth rings on the shell + a wet sheen */
+      var scx3=bcx-Math.round(brx*0.15), scy3=bcy-Math.round(bry*0.35), sr3=Math.round(bry*1.05);
+      for(rr3=Math.round(sr3*0.30); rr3<sr3; rr3+=Math.max(2,Math.round(sr3*0.16))){
+        for(var a3=0;a3<64;a3++){
+          var an3=a3/64*6.283;
+          px(c, scx3+Math.round(Math.cos(an3)*rr3), scy3+Math.round(Math.sin(an3)*rr3),
+             (Math.cos(an3)+Math.sin(an3)<0)?ramp(6):ramp(2));
+        }
+      }
+      for(i3=-Math.round(sr3*0.5);i3<Math.round(sr3*0.1);i3++){
+        var yj=scy3-Math.round(Math.sqrt(Math.max(0,sr3*sr3-i3*i3))*0.92);
+        px(c,scx3+i3,yj,ramp(7));
+      }
+    } else if(kind==='horse'){
+      /* bony rings all the way down, a ridge of spines on the back, and a lit front */
+      var seg3=Math.round(bry*0.34), half3=Math.max(2,Math.round(seg3/2));
+      for(i3=-4;i3<=4;i3++){
+        var t3=i3/2;
+        var sy3=bcy+Math.round(t3*seg3), sx3=bcx+Math.round(Math.sin(t3*0.7)*brx*0.5);
+        rp(c,sx3-brx+1,sy3,Math.max(2,brx*2-2),1, ramp(2));          // ring seam
+        rp(c,sx3-brx+1,sy3-1,Math.max(1,brx),1, ramp(6));            // lit edge of the ring
+        px(c,sx3-brx+1,sy3-2, ramp(7));                              // catch-light on the left
+        /* a spine on the outer (right) edge of every other ring */
+        if(i3%2===0){
+          var spx3=sx3+brx-1;
+          for(j3=0;j3<Math.max(2,Math.round(brx*0.5));j3++){
+            px(c,spx3+j3,sy3-j3,   ramp(1));
+            px(c,spx3+j3,sy3-j3+1, ramp(2));   // second pixel keeps the spine solid, not dotted
+          }
+        }
+        /* belly plates on the inner edge */
+        px(c,sx3-brx+2,sy3+Math.round(half3*0.5), ramp(5));
+      }
+    } else if(kind==='shrimp'){
+      /* carapace plate seams, each with a lit leading edge */
+      for(i3=-3;i3<=3;i3++){
+        var ax3=bcx+Math.round(i3*brx*0.30);
+        var arch3=Math.round(Math.cos(i3*0.42)*bry*0.55);
+        var sry3=Math.round(bry*(0.95-Math.abs(i3)*0.10));
+        for(j3=-sry3;j3<=sry3;j3++){
+          px(c,ax3+Math.round(brx*0.10),bcy-arch3+j3, ramp(2));
+          px(c,ax3+Math.round(brx*0.10)-1,bcy-arch3+j3, ramp(6));
+        }
+      }
+    }
+    /* shared: a compact sheen up-left so every creature catches the same light */
+    var hrx3=Math.round(brx*0.42), hry3=Math.round(bry*0.34);
+    var hcx3=bcx-Math.round(brx*0.22), hcy3=bcy-Math.round(bry*0.30);
+    for(var yy3=-hry3; yy3<=hry3; yy3++){
+      var ny3=(yy3*yy3)/(hry3*hry3);
+      var hw3=Math.floor(hrx3*Math.sqrt(Math.max(0,1-ny3)));
+      for(var xx3=-hw3; xx3<=hw3; xx3++){
+        var e3=(xx3*xx3)/(hrx3*hrx3)+ny3;
+        if(e3>0.3844 && rnd()<0.6) continue;          // 0.62^2
+        px(c, hcx3+xx3, hcy3+yy3, ramp(e3>0.25?6:7)); // 0.50^2
+      }
+    }
+  }
+
   /* --- tail (behind body) --- */
   if(sp.tail!=='none'){
   var tlen = (sp.tail==='veil') ? L*0.40 : (sp.tail==='lobe' ? L*0.20 : L*0.28);
@@ -1089,12 +1293,15 @@ function drawCreature(c,sp,rank,frame){
     wedge(c,x0+1,cy,tlen+1,off-L*0.22,3,3,P[0]); wedge(c,x0+1,cy,tlen+1,off+L*0.22,3,3,P[0]);
     wedge(c,x0,cy,tlen,off-L*0.22,2,2,P[1]);     wedge(c,x0,cy,tlen,off+L*0.22,2,2,P[1]);
     wedge(c,x0-1,cy-1,tlen-2,off-L*0.20,1,1,P[2]); wedge(c,x0-1,cy-1,tlen-2,off+L*0.20,1,1,P[2]);
+    finRays(c,x0-1,cy,tlen-2,L*0.20,off-L*0.11,mixHex(P[1],P[0],0.38),3+rank,-1);
+    finRays(c,x0-1,cy,tlen-2,L*0.20,off+L*0.11,mixHex(P[1],P[0],0.38),3+rank,-1);
   } else {
     var half = (sp.tail==='veil') ? L*0.34 : (sp.tail==='lobe' ? L*0.16 : L*0.26);
     tri(c,x0+1,cy,tlen,half,off,P[0],1);
     tri(c,x0,cy,tlen,half,off,P[1],0);
     tri(c,x0-1,cy-1,tlen-2,half*0.7,off,P[2],0);
     if(detail>0) tri(c,x0-2,cy-2,tlen-4,half*0.42,off,P[3],0);
+    finRays(c,x0-1,cy,tlen-1,half*0.86,off,mixHex(P[1],P[0],0.34),4+rank,-1);
   }
   }
 
@@ -1104,6 +1311,7 @@ function drawCreature(c,sp,rank,frame){
     tri(c,cx+Math.round(rx*0.35),cy-ry-1,rx*0.9,sh,-sh*0.5,P[0],1);
     tri(c,cx+Math.round(rx*0.35),cy-ry-1,rx*0.9,sh,-sh*0.5,P[1],0);
     tri(c,cx+Math.round(rx*0.30),cy-ry-2,rx*0.7,sh*0.6,-sh*0.45,P[2],0);
+    finRays(c,cx+Math.round(rx*0.32),cy-ry-2,rx*0.78,sh*0.52,-sh*0.42,mixHex(P[1],P[0],0.38),3+rank,-1);
   } else if(sp.dorsal==='small'){
     tri(c,cx+Math.round(rx*0.1),cy-ry,rx*0.5,L*0.12,-L*0.10,P[0],1);
     tri(c,cx+Math.round(rx*0.1),cy-ry,rx*0.5,L*0.12,-L*0.10,P[1],0);
@@ -1202,11 +1410,14 @@ function drawCreature(c,sp,rank,frame){
     if(detail>0) ell(c,cx-2,by-2,rx-4,ry-4,P[3]);
   }
   var oddBody = (sp.body==='snail'||sp.body==='bell'||sp.body==='horse'||sp.body==='shrimp');
+  if(!oddBody) bodyDetail(cx,by,rx,ry);
+  else oddDetail(sp.body,cx,by,rx,ry);
 
   /* --- pectoral fin --- */
   if(!oddBody){
     tri(c,cx+Math.round(rx*0.2),by+Math.round(ry*0.4),L*0.20,L*0.09,L*0.06+sway*2,P[0],1);
     tri(c,cx+Math.round(rx*0.2),by+Math.round(ry*0.4),L*0.20,L*0.09,L*0.06+sway*2,P[2],0);
+    finRays(c,cx+Math.round(rx*0.2),by+Math.round(ry*0.4),L*0.18,L*0.075,L*0.06+sway*2,mixHex(P[1],P[0],0.34),3,-1);
   }
 
   /* --- pattern --- */
@@ -1312,16 +1523,19 @@ function drawCreature(c,sp,rank,frame){
   if(sp.id==='siltlurker'){
     circ(c,ex,ey,er,P[0]); // blind: sealed socket
   } else {
-    circ(c,ex,ey,er+1,P[0]);
+    circ(c,ex,ey,er+1,SH.edge);
     circ(c,ex,ey,er,'#f2fbff');
-    circ(c,ex+Math.max(1,Math.round(er*0.3)),ey,Math.max(1,Math.round(er*0.55)),'#101820');
-    if(er>1) px(c,ex-1,ey-1,'#ffffff');
+    if(er>1) circ(c,ex+Math.max(1,Math.round(er*0.22)),ey,Math.max(1,Math.round(er*0.72)), mixHex(SH.acc,'#0d1620',0.40));
+    circ(c,ex+Math.max(1,Math.round(er*0.3)),ey,Math.max(1,Math.round(er*0.52)),'#0d1620');
+    px(c,ex-1,ey-1,'#ffffff');
+    if(er>2) px(c,ex-2,ey-1,'#d8f2ff');
+    rp(c,ex-er,ey-er-1,er*2+1,1,SH.edge);
   }
   /* --- mouth --- */
   if(!oddBody) rp(c,cx+Math.round(rx*0.86),by+Math.round(ry*0.12),Math.max(1,Math.round(L*0.06)),1,P[0]);
 
   /* --- texture (PIXEL_ART_SPEC §4.5) --- */
-  var n = 20+detail*6;
+  var n = 26+detail*12;
   for(i=0;i<n;i++){
     var a2=rnd()*6.283, r2=Math.sqrt(rnd())*0.85;
     var tx=Math.round(cx+Math.cos(a2)*rx*r2), ty2=Math.round(by+Math.sin(a2)*ry*r2);
@@ -1385,6 +1599,18 @@ function fishGlow(id){
   if(SPR.glow[id]===undefined) SPR.glow[id]=makeGlow(Math.round(RANK_LEN[2]*0.55),hexToRgb(sp.glow));
   return SPR.glow[id];
 }
+/* ---------- shade helpers (PIXEL_ART_SPEC 15.3: shadows go COLD, lights go WARM).
+     They derive extra steps from each species' own palette, so all 46 palettes stay
+     untouched. Called only while BAKING a sprite - never in the game loop. ---------- */
+function _hx(h){ var n=parseInt(h.slice(1),16); return [(n>>16)&255,(n>>8)&255,n&255]; }
+function _hex(r,g,b){
+  r=Math.max(0,Math.min(255,Math.round(r))); g=Math.max(0,Math.min(255,Math.round(g))); b=Math.max(0,Math.min(255,Math.round(b)));
+  return '#'+((1<<24)+(r<<16)+(g<<8)+b).toString(16).slice(1);
+}
+function mixHex(a,b,t){ var A=_hx(a),B=_hx(b); return _hex(A[0]+(B[0]-A[0])*t, A[1]+(B[1]-A[1])*t, A[2]+(B[2]-A[2])*t); }
+function coolHex(h,t){ var A=_hx(h); return _hex(A[0]-A[0]*t*0.30, A[1]-A[1]*t*0.10, A[2]+(255-A[2])*t*0.16); }
+function warmHex(h,t){ var A=_hx(h); return _hex(A[0]+(255-A[0])*t*0.30, A[1]+(255-A[1])*t*0.16, A[2]-A[2]*t*0.12); }
+
 function hexToRgb(h){
   var n=parseInt(h.slice(1),16);
   return ((n>>16)&255)+','+((n>>8)&255)+','+(n&255);
@@ -1739,76 +1965,236 @@ function bakeRings(){
     }
   }
 }
-function drawDecor(c,id,w,h,seed){
+var DECOR_F = 6;                 /* animation frames baked per decor variant */
+
+/* Decor is drawn for a given phase (0..1) so it can be baked into a short loop.
+   Rock stays rock: stone never sways, it shimmers. Only living things bend. */
+function drawDecor(c,id,w,h,seed,ph){
   var P=DPAL[id], rnd=mulberry32(seed), i, base=h-1, cx=w>>1;
+  ph = ph||0;
+  var TAU=6.28318, wob=Math.sin(ph*TAU), wob2=Math.sin(ph*TAU+2.1);
+  /* the same 8-step ramp idea as the creatures, so decor sits in the same light */
+  var R=[ coolHex(P[0],0.20), mixHex(P[0],P[1],0.45), mixHex(P[0],P[1],0.80), P[1],
+          mixHex(P[1],P[2],0.5), P[2], mixHex(P[2],P[3],0.5), warmHex(P[3],0.18) ];
+  function rmp(i2){ return R[i2<0?0:(i2>7?7:i2)]; }
+  function cl(x){ return Math.max(1,Math.min(w-2,x)); }
+
   if(id==='kelp'){
-    for(var b=0;b<3;b++){
-      var bx=14+b*16, lean=(rnd()*2-1)*8, top=Math.round(h*(0.10+rnd()*0.14));
+    /* a holdfast of roots, then five blades that bend more the higher they go */
+    for(i=0;i<7;i++){
+      var rx0=6+Math.round(rnd()*(w-12));
+      rp(c,rx0,base-2,3+Math.round(rnd()*4),2,rmp(1));
+      px(c,rx0,base-3,rmp(2));
+    }
+    for(var b=0;b<5;b++){
+      var bx=8+b*11, lean=(rnd()*2-1)*3, top=Math.round(h*(0.06+rnd()*0.20));
+      var swayAmp=2.6+b*0.4;
       for(var y=base;y>=top;y--){
-        var t=(base-y)/(base-top), xo=Math.round(Math.sin(t*3+b)*6+lean*t);
-        var wd=Math.max(2,Math.round(6-t*3));
-        rp(c,bx+xo-wd-1,y,wd*2+2,1,P[0]);
-        rp(c,bx+xo-wd,y,wd*2,1,P[1]);
-        rp(c,bx+xo-wd+1,y,Math.max(1,wd),1,P[2]);
-        if(y%9===0) px(c,bx+xo-wd+1,y,P[4]);
+        var t=(base-y)/(base-top);
+        var xo=Math.round(Math.sin(t*3+b)*3 + lean*t + Math.sin(ph*TAU + b*1.3 + t*2.2)*swayAmp*t*t);
+        var wd=Math.max(2,Math.round(5-t*2.6));
+        rp(c,cl(bx+xo-wd-1),y,wd*2+2,1,rmp(0));            // dark outline
+        rp(c,cl(bx+xo-wd),y,wd*2,1,rmp(2));                // shadow side
+        rp(c,cl(bx+xo-wd),y,Math.max(1,wd),1,rmp(4));      // base
+        rp(c,cl(bx+xo-wd+1),y,Math.max(1,wd-1),1,rmp(6));  // lit left edge
+        px(c,cl(bx+xo),y, rmp(3));                          // central vein
+        if(y%5===0) px(c,cl(bx+xo+wd-1),y,rmp(1));          // serrated right edge
+        if(y%9===0) px(c,cl(bx+xo-wd+1),y,rmp(7));          // sheen fleck
+        if(y%17===0){ px(c,cl(bx+xo-1),y,rmp(5)); px(c,cl(bx+xo+1),y,rmp(2)); }
+      }
+      for(i=0;i<3;i++){
+        var byy=top+Math.round((base-top)*(0.22+i*0.26));
+        var bt=(base-byy)/(base-top);
+        var bxo=Math.round(Math.sin(bt*3+b)*3 + lean*bt + Math.sin(ph*TAU+b*1.3+bt*2.2)*swayAmp*bt*bt);
+        circ(c,cl(bx+bxo+2),byy,2,rmp(1)); circ(c,cl(bx+bxo+2),byy,1,rmp(6)); px(c,cl(bx+bxo+1),byy-1,rmp(7));
       }
     }
   } else if(id==='coral'){
-    for(i=0;i<5;i++){
-      var ccx=12+i*13, ch2=Math.round(h*(0.40+rnd()*0.42)), bend=(rnd()*2-1)*5;
+    for(i=0;i<9;i++){                                        // rubble around the base
+      var rbx=3+Math.round(rnd()*(w-6));
+      rp(c,rbx,base-2,2+Math.round(rnd()*3),2,rmp(1)); px(c,rbx,base-3,rmp(4));
+    }
+    for(i=0;i<7;i++){
+      var ccx=8+i*10, ch2=Math.round(h*(0.34+rnd()*0.46)), bend=(rnd()*2-1)*3;
       for(var y2=base;y2>base-ch2;y2--){
-        var t2=(base-y2)/ch2, xo2=Math.round(Math.sin(t2*3+i)*4+bend*t2);
+        var t2=(base-y2)/ch2;
+        var xo2=Math.round(Math.sin(t2*3+i)*3 + bend*t2 + Math.sin(ph*TAU+i*0.9)*1.5*t2*t2);
         var wd2=Math.max(2,Math.round(5-t2*3));
-        rp(c,ccx+xo2-wd2,y2,wd2*2,1,P[0]);
-        rp(c,ccx+xo2-wd2+1,y2,Math.max(1,wd2*2-2),1,P[2]);
-        if(y2%5===0) px(c,ccx+xo2,y2,P[4]);
+        rp(c,cl(ccx+xo2-wd2),y2,wd2*2,1,rmp(0));
+        rp(c,cl(ccx+xo2-wd2+1),y2,Math.max(1,wd2*2-2),1,rmp(3));
+        px(c,cl(ccx+xo2-wd2+1),y2,rmp(6));
+        if(y2%3===0) px(c,cl(ccx+xo2+wd2-1),y2,rmp(1));      // pore texture
+        if(y2%6===0) px(c,cl(ccx+xo2),y2,rmp(5));
       }
-      var tipx=ccx+Math.round(Math.sin(3)*4+bend), tipy=base-ch2;
-      circ(c,tipx,tipy,3,P[0]); circ(c,tipx,tipy,2,P[3]); px(c,tipx,tipy-1,P[4]);
+      /* a side branch halfway up */
+      if(i%2===0){
+        var sby=base-Math.round(ch2*0.55);
+        for(var sj2=0;sj2<Math.round(ch2*0.28);sj2++){
+          var sxo=Math.round(Math.sin(ph*TAU+i)*1.2*(sj2/8));
+          rp(c,cl(ccx+3+sj2+sxo),sby-sj2,2,1,rmp(2));
+          px(c,cl(ccx+3+sj2+sxo),sby-sj2,rmp(5));
+        }
+      }
+      var tipx=ccx+Math.round(Math.sin(3)*3+bend), tipy=base-ch2;
+      var pulse=0.5+0.5*Math.sin(ph*TAU+i*1.25);
+      circ(c,cl(tipx),tipy,3,rmp(0));
+      circ(c,cl(tipx),tipy,2,rmp(pulse>0.6?7:4));
+      px(c,cl(tipx),tipy-1,rmp(pulse>0.35?7:6));
+      for(var pj=0;pj<5;pj++){
+        var pa=pj*1.26+ph*TAU*0.5;
+        px(c, cl(tipx+Math.round(Math.cos(pa)*3)), tipy+Math.round(Math.sin(pa)*3), rmp(pj%2?6:5));
+      }
     }
   } else if(id==='grotto'){
-    dome(c,cx,base,Math.round(w*0.48),h-2,P[0]);
-    dome(c,cx,base,Math.round(w*0.45),h-4,P[1]);
-    dome(c,cx-2,base,Math.round(w*0.38),h-9,P[2]);
-    dome(c,cx-4,base,Math.round(w*0.26),h-16,P[3]);
-    dome(c,cx,base,Math.round(w*0.20),Math.round(h*0.62),P[0]);
+    dome(c,cx,base,Math.round(w*0.48),h-2,rmp(0));
+    dome(c,cx,base,Math.round(w*0.46),h-4,rmp(2));
+    dome(c,cx-1,base,Math.round(w*0.42),h-7,rmp(3));
+    dome(c,cx-2,base,Math.round(w*0.36),h-11,rmp(4));
+    dome(c,cx-4,base,Math.round(w*0.25),h-17,rmp(6));
+    dome(c,cx,base,Math.round(w*0.20),Math.round(h*0.62),rmp(0));
     dome(c,cx,base,Math.round(w*0.17),Math.round(h*0.58),'#05161d');
-    for(i=0;i<26;i++) px(c,Math.round(2+rnd()*(w-4)),Math.round(base-rnd()*(h-6)), rnd()<0.5?P[1]:P[4]);
+    for(i=0;i<7;i++){                                        // cracks
+      var kx=Math.round(6+rnd()*(w-12)), ky=Math.round(base-4-rnd()*(h*0.55)), kl=3+Math.round(rnd()*8);
+      for(var kj=0;kj<kl;kj++){ px(c, cl(kx+kj), ky+Math.round(kj*0.6), rmp(1)); px(c, cl(kx+kj), ky+Math.round(kj*0.6)+1, rmp(4)); }
+    }
+    for(i=0;i<44;i++) px(c,Math.round(2+rnd()*(w-4)),Math.round(base-rnd()*(h-6)), rnd()<0.5?rmp(2):rmp(6));
+    for(i=0;i<9;i++){                                        // moss patches on the top
+      var mx=Math.round(8+rnd()*(w-16)), my=Math.round(base-h*0.45-rnd()*h*0.35);
+      rp(c,cl(mx),my,2+Math.round(rnd()*2),1,rmp(5)); px(c,cl(mx),my-1,rmp(7));
+    }
+    for(i=0;i<6;i++){                                        // rim light on the upper left
+      px(c, cl(Math.round(cx-w*0.30+i*2)), base-Math.round(h*0.72)+i, rmp(7));
+    }
+    /* the rock is still - what lives on it moves: anemones and cave motes */
+    for(i=0;i<10;i++){
+      var ax=Math.round(w*0.10+i*w*0.085), ay=base-Math.round(h*(0.46+((i%3)*0.09)));
+      var alen=6+(i%3);
+      for(var aj=0;aj<alen;aj++){
+        var aw=Math.sin(ph*TAU+i*0.9+aj*0.55)*3.4;
+        var axx=cl(ax+Math.round(aw*(aj/alen)));
+        px(c, axx, ay-aj, rmp(aj>alen-3?6:3));
+        if(aj>alen-2) px(c, axx+1, ay-aj, rmp(7));
+      }
+    }
+    for(i=0;i<10;i++){                                       // motes drifting through the mouth
+      var mp=((ph+i*0.1)%1);
+      px(c, cl(cx-8+Math.round(Math.sin(mp*TAU+i)*7)), base-4-Math.round(mp*h*0.46), rmp(i%2?6:7));
+    }
   } else if(id==='crystal'){
-    for(i=0;i<4;i++){
-      var sx=10+i*13, sh2=Math.round(h*(0.35+rnd()*0.58)), sw=3+Math.round(rnd()*3);
-      var lean2=(rnd()*2-1)*5;
-      spike(c,sx,base,sw+1,sh2,lean2,P[0]);
-      spike(c,sx,base-1,sw,sh2-2,lean2,P[2]);
-      spike(c,sx-1,base-2,Math.max(1,sw-2),sh2-5,lean2,P[3]);
-      px(c,sx,base-sh2+2,P[4]);
+    for(i=0;i<8;i++){                                        // shattered chips at the base
+      var chx=3+Math.round(rnd()*(w-6));
+      rp(c,chx,base-2,2+Math.round(rnd()*2),2,rmp(1)); px(c,chx,base-3,rmp(6));
+    }
+    for(i=0;i<6;i++){
+      var sx=6+i*9, sh2=Math.round(h*(0.30+rnd()*0.62)), sw=3+Math.round(rnd()*3);
+      var lean2=(rnd()*2-1)*4;
+      spike(c,sx,base,sw+1,sh2,lean2,rmp(0));
+      spike(c,sx,base-1,sw,sh2-2,lean2,rmp(3));
+      spike(c,sx-1,base-2,Math.max(1,sw-2),sh2-5,lean2,rmp(5));
+      spike(c,sx-1,base-3,Math.max(1,sw-3),sh2-9,lean2,rmp(6));
+      for(var fj=2;fj<sh2-4;fj+=3){                          // facet seams
+        px(c, cl(sx+Math.round(lean2*(fj/sh2))), base-fj, rmp(2));
+        px(c, cl(sx+Math.round(lean2*(fj/sh2))-1), base-fj, rmp(6));
+      }
+      /* a band of inner light travels up the shard - the whole shard breathes */
+      var gpos=((ph+i*0.17)%1);
+      var gy=base-3-Math.round(gpos*(sh2-8));
+      for(var gj=0;gj<4;gj++){
+        var gyy=gy+gj;
+        if(gyy<base-2 && gyy>base-sh2)
+          rp(c, cl(sx+Math.round(lean2*((base-gyy)/sh2))-1), gyy, Math.max(1,sw-1), 1, rmp(gj<2?7:6));
+      }
+      px(c,cl(sx),base-sh2+2,rmp(7));
     }
   } else if(id==='vent'){
-    dome(c,cx,base,Math.round(w*0.48),h-2,P[0]);
-    dome(c,cx,base,Math.round(w*0.44),h-4,P[1]);
-    dome(c,cx-2,base,Math.round(w*0.34),h-9,P[2]);
-    dome(c,cx,base,4,Math.round(h*0.55),P[0]);
+    dome(c,cx,base,Math.round(w*0.48),h-2,rmp(0));
+    dome(c,cx,base,Math.round(w*0.45),h-4,rmp(2));
+    dome(c,cx-1,base,Math.round(w*0.40),h-7,rmp(3));
+    dome(c,cx-2,base,Math.round(w*0.32),h-10,rmp(5));
+    for(i=0;i<5;i++){                                        // mineral crust rings
+      var cry=base-2-i*Math.round(h*0.12);
+      var crw=Math.round(w*(0.40-i*0.05));
+      rp(c,cx-crw,cry,crw*2,1,rmp(1));
+      rp(c,cx-crw+1,cry-1,Math.max(1,crw),1,rmp(6));
+    }
+    dome(c,cx,base,4,Math.round(h*0.55),rmp(0));
     dome(c,cx,base,3,Math.round(h*0.50),'#0a1c24');
-    for(i=0;i<14;i++) px(c,Math.round(2+rnd()*(w-4)),Math.round(base-rnd()*(h-6)), rnd()<0.5?P[3]:P[1]);
+    for(i=0;i<26;i++) px(c,Math.round(2+rnd()*(w-4)),Math.round(base-rnd()*(h-6)), rnd()<0.5?rmp(6):rmp(2));
+    /* glowing cracks that pulse with the vent */
+    var glow=0.5+0.5*Math.sin(ph*TAU);
+    for(i=0;i<4;i++){
+      var gx2=cx-8+i*5, gy2=base-6-i*2;
+      px(c,cl(gx2),gy2, glow>0.5?rmp(7):rmp(5));
+      px(c,cl(gx2+1),gy2+1, glow>0.5?rmp(6):rmp(4));
+    }
+    /* heat shimmer climbing out of the mouth, three plumes on a loop */
+    for(i=0;i<6;i++){
+      var pr=((ph+i/6)%1);
+      var ry2=base-Math.round(h*0.46)-Math.round(pr*h*0.50);
+      var rw=1+Math.round(pr*5);
+      if(ry2>0){
+        for(var pk=-1;pk<=1;pk++){
+          px(c,cl(cx-rw+pk),ry2,rmp(pk===0?7:6));
+          px(c,cl(cx+rw+pk),ry2,rmp(pk===0?7:6));
+        }
+        px(c,cl(cx-rw+1),ry2+1,rmp(5)); px(c,cl(cx+rw-1),ry2+1,rmp(5));
+        px(c,cl(cx),ry2-1,rmp(7));
+      }
+    }
+    for(i=0;i<8;i++){                                        // crust that glitters as heat passes
+      var gtx=cl(4+Math.round(rnd()*(w-8))), gty=base-2-Math.round(rnd()*h*0.5);
+      px(c,gtx,gty, (Math.sin(ph*TAU+i)>0.2)?rmp(7):rmp(3));
+    }
+    circ(c,cx,base-Math.round(h*0.50),2, glow>0.5?rmp(7):rmp(4));
+    if(glow>0.75) circ(c,cx,base-Math.round(h*0.50),3,rmp(6));
   } else if(id==='idol'){
-    rp(c,cx-15,base-7,30,8,P[0]); rp(c,cx-14,base-6,28,6,P[1]);
-    ell(c,cx,base-24,11,16,P[0]); ell(c,cx,base-24,10,15,P[1]);
-    ell(c,cx-1,base-26,8,12,P[2]); ell(c,cx-2,base-28,5,8,P[3]);
-    ell(c,cx,base-48,9,11,P[0]); ell(c,cx,base-48,8,10,P[1]); ell(c,cx-1,base-50,6,7,P[2]);
-    circ(c,cx,base-50,3,P[0]); circ(c,cx,base-50,2,P[4]);
-    for(i=0;i<20;i++) px(c,Math.round(cx-12+rnd()*24),Math.round(base-8-rnd()*48), rnd()<0.5?P[0]:P[3]);
+    rp(c,cx-15,base-7,30,8,rmp(0)); rp(c,cx-14,base-6,28,6,rmp(2)); rp(c,cx-13,base-6,26,1,rmp(5));
+    ell(c,cx,base-24,11,16,rmp(0)); ell(c,cx,base-24,10,15,rmp(2));
+    ell(c,cx-1,base-26,8,12,rmp(4)); ell(c,cx-2,base-28,5,8,rmp(6));
+    ell(c,cx,base-48,9,11,rmp(0)); ell(c,cx,base-48,8,10,rmp(2)); ell(c,cx-1,base-50,6,7,rmp(5));
+    for(i=0;i<5;i++){                                        // carved bands
+      var byy2=base-13-i*7; rp(c,cx-8,byy2,16,1,rmp(1)); rp(c,cx-7,byy2-1,14,1,rmp(6));
+    }
+    for(i=0;i<6;i++){                                        // runes
+      var rux=cx-6+((i%3)*6), ruy=base-18-Math.floor(i/3)*10;
+      px(c,rux,ruy,rmp(1)); px(c,rux+1,ruy,rmp(1)); px(c,rux,ruy+1,rmp(1)); px(c,rux+1,ruy-1,rmp(6));
+    }
+    for(i=0;i<30;i++) px(c,Math.round(cx-12+rnd()*24),Math.round(base-8-rnd()*48), rnd()<0.5?rmp(1):rmp(6));
+    for(i=0;i<7;i++){                                        // moss creeping up the base
+      var mox=cx-12+Math.round(rnd()*24);
+      px(c,cl(mox),base-8-Math.round(rnd()*6),rmp(5));
+    }
+    var eye=0.5+0.5*Math.sin(ph*TAU);
+    circ(c,cx,base-50,3,rmp(0));
+    circ(c,cx,base-50,2, eye>0.55?rmp(7):rmp(3));
+    if(eye>0.8){ px(c,cx,base-51,rmp(7)); circ(c,cx,base-50,3,rmp(6)); circ(c,cx,base-50,2,rmp(7)); }
+    var shy=base-18-Math.round(((ph+0.35)%1)*36);
+    for(var sj=-7;sj<=7;sj++) px(c, cl(cx+sj), shy+Math.round(Math.abs(sj)*0.3), rmp(6));
   }
 }
+
 function bakeDecor(){
   for(var i=0;i<DECOR.length;i++){
     var d=DECOR[i]; SPR.decor[d.id]=[];
     for(var v=0;v<2;v++){
-      (function(d,v){
-        SPR.decor[d.id].push(makeSprite(d.w,d.h,function(c,w,h){ drawDecor(c,d.id,w,h,0x5EED+d.id.length*97+v*31); }));
-      })(d,v);
+      for(var f=0;f<DECOR_F;f++){
+        (function(d,v,f){
+          SPR.decor[d.id].push(makeSprite(d.w,d.h,function(c,w,h){
+            drawDecor(c,d.id,w,h,0x5EED+d.id.length*97+v*31, f/DECOR_F);
+          }));
+        })(d,v,f);
+      }
     }
   }
 }
+/* The one place that turns (variant, frame) into a baked sprite. The game loop only
+   ever picks an already-baked image - decor is never drawn from scratch per frame. */
+function decorImg(id,v,f){
+  var arr=SPR.decor[id]; if(!arr||!arr.length) return null;
+  v=((v|0)%2+2)%2; f=(((f|0)%DECOR_F)+DECOR_F)%DECOR_F;
+  return arr[v*DECOR_F+f] || arr[0];
+}
+
 function drawOrnament(c,kind,w,h,seed){
   var rnd=mulberry32(seed), base=h-1, cx=w>>1, i;
   if(kind==='castle'){
@@ -2648,7 +3034,7 @@ function drawScene(c){
   for(var di=0;di<G.decor.length;di++){
     var dd=G.decor[di], def=decorDef(dd.id);
     if(!def) continue;
-    var dimg=SPR.decor[dd.id] ? SPR.decor[dd.id][dd.v||0] : null;
+    var dimg=decorImg(dd.id, dd.v||0, Math.floor(G.t*5 + (dd.x||0)*0.07));
     if(!dimg) continue;
     c.drawImage(dimg, Math.round(dd.x-dimg.width/2), FLOOR-dimg.height+6);
     if(G.buildOpen && G.buildTab==='decor'){
@@ -2681,7 +3067,7 @@ function drawScene(c){
      unless you are holding something. */
   if(G.placing){
     var gd=decorDef(G.placing);
-    var gimg=gd && SPR.decor[gd.id] ? SPR.decor[gd.id][0] : null;
+    var gimg=gd ? decorImg(gd.id,0,0) : null;
     if(gimg){
       /* the piece sits ON THE FLOOR at the finger's x; if the finger hasn't touched
          yet, park it at centre. It always stands on the floor, never floats. */
@@ -2972,7 +3358,7 @@ function drawUI(c){
         var d=DECOR[bi], sx2=130+bi*136, sel=(bi===G.buildIdx);
         var slot={x:sx2,y:sy+4,w:130,h:74};
         panel(c,slot.x,slot.y,slot.w,slot.h, sel?'#175f6d':'#0b2b36');
-        var dimg2=SPR.decor[d.id] ? SPR.decor[d.id][0] : null;
+        var dimg2=decorImg(d.id,0,0);
         if(dimg2){
           var dsc=Math.min(48/dimg2.width, 44/dimg2.height, 1);
           var dw2=Math.max(2,Math.round(dimg2.width*dsc)), dh2=Math.max(2,Math.round(dimg2.height*dsc));
@@ -3264,7 +3650,7 @@ function drawShowcase(c){
 
   /* placed decor sits on the floor, behind the fish */
   for(var d=0;d<G.scDecor.length;d++){
-    var sd=G.scDecor[d], dimg=SPR.decor[sd.id]?SPR.decor[sd.id][0]:null;
+    var sd=G.scDecor[d], dimg=decorImg(sd.id, 0, Math.floor(G.t*5 + (sd.x||0)*0.07));
     if(dimg) c.drawImage(dimg, Math.round(sd.x-dimg.width/2), FLOOR-dimg.height+6);
   }
 
@@ -3301,7 +3687,7 @@ function drawShowcase(c){
 
   /* the decor ghost being placed follows the finger, on the floor */
   if(G.scPlacing){
-    var gd=decorDef(G.scPlacing), gimg=gd&&SPR.decor[gd.id]?SPR.decor[gd.id][0]:null;
+    var gd=decorDef(G.scPlacing), gimg=gd?decorImg(gd.id,0,0):null;
     if(gimg){
       var gx=G.ptrIn?Math.max(40+gimg.width/2,Math.min(W-40-gimg.width/2,G.ptr.x)):W/2;
       c.globalAlpha=0.7; c.drawImage(gimg, Math.round(gx-gimg.width/2), FLOOR-gimg.height+6); c.globalAlpha=1;
@@ -3337,7 +3723,7 @@ function drawShowcase(c){
     for(var k=0;k<owned.length;k++){
       var sx=20+k*(sw2+6), sel=(G.scPlacing===owned[k].id);
       panel(c,sx,sy,sw2,40, sel?'#175f6d':'#0a2a36');
-      var di2=SPR.decor[owned[k].id]?SPR.decor[owned[k].id][0]:null;
+      var di2=decorImg(owned[k].id,0,0);
       if(di2){ var ds=Math.min(sw2/di2.width,36/di2.height,1); c.drawImage(di2, Math.round(sx+sw2/2-di2.width*ds/2), Math.round(sy+38-di2.height*ds), Math.round(di2.width*ds), Math.round(di2.height*ds)); }
       BTN['scdec'+k]={x:sx,y:sy,w:sw2,h:40,_id:owned[k].id};
     }
@@ -4120,7 +4506,7 @@ function askName(){
 }
 /* expose for the headless test harness */
 if(typeof window!=='undefined'){
-  window.__DG={G:G,get BTN(){return BTN;},setRenderTarget:function(nc){ cv=nc; ctx=nc.getContext('2d'); ctx.imageSmoothingEnabled=false; },tryResume:tryResume,bakeGlass:bakeGlass,PATRON:PATRON,patronDef:patronDef,fundPlaque:fundPlaque,collectionComplete:collectionComplete,get _lastFills(){return _glassFills;},audioReport:audioReport,audioTest:audioTest,speciesCount:speciesCount,discover:discover,get confirmBtns(){return G.confirmBtns;},isFinalForm:isFinalForm,SPECIES:SPECIES,TIPS:TIPS,COSMETICS:COSMETICS,sellPrice:sellPrice,cosmeticDef:cosmeticDef,equipped:equipped,addStars:addStars,BADGES:BADGES,badgeDef:badgeDef,badgeStat:badgeStat,checkBadges:checkBadges,ts:ts,UI_MIN:UI_MIN,codexPages:codexPages,CODEX_PER_PAGE:CODEX_PER_PAGE,codexCell:codexCell,runAway:runAway,AWAY_CAP:AWAY_CAP,sessionStart:sessionStart,sessionEmpty:sessionEmpty,tipTick:tipTick,dismissTip:dismissTip,tipDef:tipDef,SPR:SPR,RIPEN:RIPEN,BIOMES:BIOMES,setBiome:setBiome,biomeDef:biomeDef,bakeScene:bakeScene,AU:AU,audioInit:audioInit,armAudio:armAudio,audioReady:audioReady,unlockSession:unlockSession,audioMute:audioMute,musicTick:musicTick,sfx:sfx,musicStep:musicStep,ACHS:ACHS,LOCKED_BASE:LOCKED_BASE,availableBase:availableBase,newGame:newGame,checkAchs:checkAchs,bumpStat:bumpStat,LB:LB,lbVisible:lbVisible,hasSave:hasSave,fishFrames:fishFrames,fishGlow:fishGlow,SIGNAL:SIGNAL,releaseFish:releaseFish,settleFish:settleFish,EVENT_T:EVENT_T,tankFull:tankFull,RANK_O2:RANK_O2,DECOR:DECOR,DECOR_MAX:DECOR_MAX,QUEST_POOL:QUEST_POOL,placeDecor:placeDecor,removeDecor:removeDecor,recalcEnv:recalcEnv,questEvent:questEvent,fillQuests:fillQuests,questDef:questDef,save:save,update:update,render:render,feedBaby:feedBaby,tryMerge:tryMerge,mergeKind:mergeKind,CHIMERA:CHIMERA,CHIMERA_CHANCE:CHIMERA_CHANCE,chimeraKey:chimeraKey,
+  window.__DG={G:G,get BTN(){return BTN;},setRenderTarget:function(nc){ cv=nc; ctx=nc.getContext('2d'); ctx.imageSmoothingEnabled=false; },tryResume:tryResume,bakeGlass:bakeGlass,PATRON:PATRON,patronDef:patronDef,fundPlaque:fundPlaque,collectionComplete:collectionComplete,get _lastFills(){return _glassFills;},audioReport:audioReport,audioTest:audioTest,speciesCount:speciesCount,discover:discover,get confirmBtns(){return G.confirmBtns;},isFinalForm:isFinalForm,SPECIES:SPECIES,TIPS:TIPS,COSMETICS:COSMETICS,sellPrice:sellPrice,cosmeticDef:cosmeticDef,equipped:equipped,addStars:addStars,BADGES:BADGES,badgeDef:badgeDef,badgeStat:badgeStat,checkBadges:checkBadges,ts:ts,UI_MIN:UI_MIN,codexPages:codexPages,CODEX_PER_PAGE:CODEX_PER_PAGE,codexCell:codexCell,runAway:runAway,AWAY_CAP:AWAY_CAP,sessionStart:sessionStart,sessionEmpty:sessionEmpty,tipTick:tipTick,dismissTip:dismissTip,tipDef:tipDef,SPR:SPR,RIPEN:RIPEN,BIOMES:BIOMES,setBiome:setBiome,biomeDef:biomeDef,bakeScene:bakeScene,AU:AU,audioInit:audioInit,armAudio:armAudio,audioReady:audioReady,unlockSession:unlockSession,audioMute:audioMute,musicTick:musicTick,sfx:sfx,musicStep:musicStep,ACHS:ACHS,LOCKED_BASE:LOCKED_BASE,availableBase:availableBase,newGame:newGame,checkAchs:checkAchs,bumpStat:bumpStat,LB:LB,lbVisible:lbVisible,hasSave:hasSave,fishFrames:fishFrames,fishGlow:fishGlow,SIGNAL:SIGNAL,releaseFish:releaseFish,settleFish:settleFish,EVENT_T:EVENT_T,tankFull:tankFull,RANK_O2:RANK_O2,DECOR:DECOR,DECOR_MAX:DECOR_MAX,QUEST_POOL:QUEST_POOL,placeDecor:placeDecor,removeDecor:removeDecor,recalcEnv:recalcEnv,questEvent:questEvent,fillQuests:fillQuests,questDef:questDef,save:save,update:update,render:render,feedBaby:feedBaby,decorImg:decorImg,DECOR_F:DECOR_F,tryMerge:tryMerge,mergeKind:mergeKind,CHIMERA:CHIMERA,CHIMERA_CHANCE:CHIMERA_CHANCE,chimeraKey:chimeraKey,
     makeFish:makeFish,spawnFry:spawnFry,boot:boot,recalcOxygen:recalcOxygen,
     RANK_LEN:RANK_LEN,creatureCanvasSize:creatureCanvasSize,drawCreature:drawCreature,
     SPECIES_ORDER:SPECIES_ORDER,addPearls:addPearls,PEARL_CAP:PEARL_CAP,load:load,FOODS:FOODS};
