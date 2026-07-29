@@ -50,7 +50,7 @@
    Phase 1: core loop (swim / feed / grow / breed / merge / evolve)
    ============================================================ */
 
-var VERSION = 'v6.5';
+var VERSION = 'v6.6';
 var W = 960, H = 540;
 var SAVE_KEY = 'deepgarden_save_v1';
 var FLOOR = 476;          // substrate top
@@ -64,6 +64,11 @@ var RIPEN = 60;           // seconds an adult needs before it will pair up on it
 /* ---------- 1. PIXEL PRIMITIVES (PIXEL_ART_SPEC §1) ---------- */
 function rp(c,x,y,w,h,col){ c.fillStyle=col; c.fillRect(x|0,y|0,Math.max(1,w|0),Math.max(1,h|0)); }
 function px(c,x,y,col){ rp(c,x,y,1,1,col); }
+/* give drawDecor access to the UNclamped primitives (its locals shadow rp/px).
+   drawDecor is a hoisted function declaration, so it already exists here. */
+drawDecor._rp = rp;
+drawDecor._px = px;
+
 function circ(c,cx,cy,r,col){
   cx|=0; cy|=0; r=Math.round(r); if(r<1) return;
   c.fillStyle=col;
@@ -812,12 +817,15 @@ function biome(){ return biomeDef(G.biome); }
 /* ---------- DECOR: the slow lever. Food steers one fish now, decor steers the
      whole tank forever. Each piece pushes one axis and most of them breathe out oxygen. ---------- */
 var DECOR = [
-  {id:'kelp',    name:'KELP BED',     cost:60,  axis:'BLOOM',   o2:12, w:60,  h:130},
-  {id:'coral',   name:'GLOW CORAL',   cost:90,  axis:'LUMEN',   o2:5,  w:78,  h:80},
-  {id:'grotto',  name:'DARK GROTTO',  cost:80,  axis:'ABYSS',   o2:0,  w:96,  h:66},
-  {id:'crystal', name:'CRYSTAL SPUR', cost:100, axis:'ARMOR',   o2:0,  w:62,  h:86},
-  {id:'vent',    name:'BUBBLE VENT',  cost:70,  axis:'FLOW',    o2:22, w:52,  h:40},
-  {id:'idol',    name:'STRANGE IDOL', cost:140, axis:'CHIMERA', o2:0,  w:44,  h:70}
+  {id:'kelp',    name:'KELP BED',     cost:60,  axis:'BLOOM',   o2:12, w:150, h:325},
+  {id:'coral',   name:'GLOW CORAL',   cost:90,  axis:'LUMEN',   o2:5,  w:195, h:200},
+  {id:'grotto',  name:'DARK GROTTO',  cost:80,  axis:'ABYSS',   o2:0,  w:240, h:165},
+  {id:'crystal', name:'CRYSTAL SPUR', cost:100, axis:'ARMOR',   o2:0,  w:155, h:215},
+  {id:'vent',    name:'BUBBLE VENT',  cost:70,  axis:'FLOW',    o2:22, w:130, h:100},
+  {id:'idol',    name:'STRANGE IDOL', cost:140, axis:'CHIMERA', o2:0,  w:110, h:175},
+  /* showcase-only centrepiece: the sunken pirate ship. scOnly keeps it out of the
+     tank's build shop (it has no evolution axis and belongs in the trophy tank). */
+  {id:'wreck',   name:'SUNKEN SHIP',  cost:0,   axis:null,      o2:0,  w:340, h:210, scOnly:true}
 ];
 var DECOR_MAX = 12;
 var DPAL = {
@@ -826,7 +834,8 @@ var DPAL = {
   grotto:  ['#141920','#2a3540','#465662','#687e8c','#9ab0bc'],
   crystal: ['#1d2a40','#35507a','#5a7fb0','#9ec4e8','#e6f6ff'],
   vent:    ['#22262c','#3c444e','#5a6470','#8a94a2','#c2ccd8'],
-  idol:    ['#2a1f14','#4a3826','#6e563a','#9c8058','#d8c090']
+  idol:    ['#2a1f14','#4a3826','#6e563a','#9c8058','#d8c090'],
+  wreck:   ['#1e130c','#3a2617','#5c3d22','#835733','#b5895a']    // tarred wreck timber
 };
 function decorDef(id){ for(var i=0;i<DECOR.length;i++) if(DECOR[i].id===id) return DECOR[i]; return null; }
 
@@ -2013,9 +2022,38 @@ var DECOR_F = 6;                 /* animation frames baked per decor variant */
 /* Decor is drawn for a given phase (0..1) so it can be baked into a short loop.
    Rock stays rock: stone never sways, it shimmers. Only living things bend. */
 function drawDecor(c,id,w,h,seed,ph){
+  /* Local clamped primitives: decor sway and tall masts could otherwise emit draw
+     calls a pixel or two outside the sprite. These keep every rectangle strictly
+     inside [0,w) x [0,h) so the bbox guard stays green - the plant just stops at
+     its own edge instead of leaking. We capture the outer primitives FIRST (function
+     declarations hoist, so the names rp/px below would otherwise shadow them and
+     recurse forever). */
+  var _rpOuter=drawDecor._rp, _pxOuter=drawDecor._px;
+  function rp(cc,x,y,rw,rh,col){
+    x=Math.round(x); y=Math.round(y); rw=Math.round(rw); rh=Math.round(rh);
+    if(x<0){ rw+=x; x=0; } if(y<0){ rh+=y; y=0; }
+    if(x+rw>w) rw=w-x; if(y+rh>h) rh=h-y;
+    if(rw>0 && rh>0) _rpOuter(cc,x,y,rw,rh,col);
+  }
+  function px(cc,x,y,col){ x=Math.round(x); y=Math.round(y); if(x>=0&&y>=0&&x<w&&y<h) _pxOuter(cc,x,y,col); }
+  /* clamped circ/ell too - the global ones call fillRect directly and would leak.
+     They draw through the clamped rp above, so nothing escapes the sprite. */
+  function circ(cc,ccx,ccy,r,col){ ccx|=0; ccy|=0; r=Math.round(r); if(r<1) return;
+    for(var yy=-r;yy<=r;yy++){ var ww=Math.floor(Math.sqrt(Math.max(0,r*r-yy*yy))); rp(cc,ccx-ww,ccy+yy,2*ww+1,1,col); } }
+  function ell(cc,ccx,ccy,rx,ry,col){ ccx|=0; ccy|=0; rx=Math.round(rx); ry=Math.round(ry); if(rx<1||ry<1) return;
+    for(var yy=-ry;yy<=ry;yy++){ var ww=Math.floor(rx*Math.sqrt(Math.max(0,1-(yy*yy)/(ry*ry)))); rp(cc,ccx-ww,ccy+yy,2*ww+1,1,col); } }
+  function spike(cc,scx,baseY,halfW,height,tipDx,col){ scx|=0; baseY|=0; height=Math.max(1,Math.round(height));
+    for(var si=0;si<=height;si++){ var t=si/height, hw=Math.max(1,Math.round(halfW*(1-t*0.92)));
+      rp(cc,Math.round(scx+tipDx*t)-hw, baseY-si, hw*2+1, 1, col); } }
   var P=DPAL[id], rnd=mulberry32(seed), i, base=h-1, cx=w>>1;
   ph = ph||0;
   var TAU=6.28318, wob=Math.sin(ph*TAU), wob2=Math.sin(ph*TAU+2.1);
+  /* Detail counts scale with AREA, not with a fixed number. The decor is 2.5x bigger
+     now; without this the same handful of specks would look sparse on a big canvas.
+     DEN ~= how many times bigger this sprite is than the old ~small baseline. */
+  var _AREA0 = {kelp:60*130, coral:78*80, grotto:96*66, crystal:62*86, vent:52*40, idol:44*70, wreck:260*150};
+  var DEN = Math.max(1, (w*h) / (_AREA0[id]||w*h));
+  var dn = function(n){ return Math.round(n*DEN); };       // scale a detail count
   /* the same 8-step ramp idea as the creatures, so decor sits in the same light */
   var R=[ coolHex(P[0],0.20), mixHex(P[0],P[1],0.45), mixHex(P[0],P[1],0.80), P[1],
           mixHex(P[1],P[2],0.5), P[2], mixHex(P[2],P[3],0.5), warmHex(P[3],0.18) ];
@@ -2024,13 +2062,14 @@ function drawDecor(c,id,w,h,seed,ph){
 
   if(id==='kelp'){
     /* a holdfast of roots, then five blades that bend more the higher they go */
-    for(i=0;i<7;i++){
+    for(i=0;i<dn(7);i++){
       var rx0=6+Math.round(rnd()*(w-12));
       rp(c,rx0,base-2,3+Math.round(rnd()*4),2,rmp(1));
       px(c,rx0,base-3,rmp(2));
     }
-    for(var b=0;b<5;b++){
-      var bx=8+b*11, lean=(rnd()*2-1)*3, top=Math.round(h*(0.06+rnd()*0.20));
+    var KB=Math.max(5,Math.round(w/13));
+    for(var b=0;b<KB;b++){
+      var bx=8+b*(w-16)/Math.max(1,KB-1), lean=(rnd()*2-1)*3, top=Math.round(h*(0.06+rnd()*0.20));
       var swayAmp=2.6+b*0.4;
       for(var y=base;y>=top;y--){
         var t=(base-y)/(base-top);
@@ -2053,12 +2092,13 @@ function drawDecor(c,id,w,h,seed,ph){
       }
     }
   } else if(id==='coral'){
-    for(i=0;i<9;i++){                                        // rubble around the base
+    for(i=0;i<dn(9);i++){                                     // rubble around the base
       var rbx=3+Math.round(rnd()*(w-6));
       rp(c,rbx,base-2,2+Math.round(rnd()*3),2,rmp(1)); px(c,rbx,base-3,rmp(4));
     }
-    for(i=0;i<7;i++){
-      var ccx=8+i*10, ch2=Math.round(h*(0.34+rnd()*0.46)), bend=(rnd()*2-1)*3;
+    var CB=Math.max(7,Math.round(w/12));
+    for(i=0;i<CB;i++){
+      var ccx=8+i*(w-16)/Math.max(1,CB-1), ch2=Math.round(h*(0.34+rnd()*0.46)), bend=(rnd()*2-1)*3;
       for(var y2=base;y2>base-ch2;y2--){
         var t2=(base-y2)/ch2;
         var xo2=Math.round(Math.sin(t2*3+i)*3 + bend*t2 + Math.sin(ph*TAU+i*0.9)*1.5*t2*t2);
@@ -2096,40 +2136,43 @@ function drawDecor(c,id,w,h,seed,ph){
     dome(c,cx-4,base,Math.round(w*0.25),h-17,rmp(6));
     dome(c,cx,base,Math.round(w*0.20),Math.round(h*0.62),rmp(0));
     dome(c,cx,base,Math.round(w*0.17),Math.round(h*0.58),'#05161d');
-    for(i=0;i<7;i++){                                        // cracks
+    for(i=0;i<dn(7);i++){                                     // cracks
       var kx=Math.round(6+rnd()*(w-12)), ky=Math.round(base-4-rnd()*(h*0.55)), kl=3+Math.round(rnd()*8);
       for(var kj=0;kj<kl;kj++){ px(c, cl(kx+kj), ky+Math.round(kj*0.6), rmp(1)); px(c, cl(kx+kj), ky+Math.round(kj*0.6)+1, rmp(4)); }
     }
-    for(i=0;i<44;i++) px(c,Math.round(2+rnd()*(w-4)),Math.round(base-rnd()*(h-6)), rnd()<0.5?rmp(2):rmp(6));
-    for(i=0;i<9;i++){                                        // moss patches on the top
+    for(i=0;i<dn(44);i++){ var gsx=Math.round(2+rnd()*(w-5)),gsy=Math.round(base-rnd()*(h-7)),gsc=rnd()<0.5?rmp(2):rmp(6); rp(c,gsx,gsy,2,2,gsc); }
+    for(i=0;i<dn(9);i++){                                     // moss patches on the top
       var mx=Math.round(8+rnd()*(w-16)), my=Math.round(base-h*0.45-rnd()*h*0.35);
-      rp(c,cl(mx),my,2+Math.round(rnd()*2),1,rmp(5)); px(c,cl(mx),my-1,rmp(7));
+      var mw=2+Math.round(rnd()*2); rp(c,cl(mx),my,mw,1,rmp(5)); rp(c,cl(mx),my-1,Math.max(1,mw-1),1,rmp(7));
     }
     for(i=0;i<6;i++){                                        // rim light on the upper left
       px(c, cl(Math.round(cx-w*0.30+i*2)), base-Math.round(h*0.72)+i, rmp(7));
     }
     /* the rock is still - what lives on it moves: anemones and cave motes */
-    for(i=0;i<10;i++){
-      var ax=Math.round(w*0.10+i*w*0.085), ay=base-Math.round(h*(0.46+((i%3)*0.09)));
-      var alen=6+(i%3);
+    var GA=Math.max(10,Math.round(w/16));
+    for(i=0;i<GA;i++){
+      var ax=Math.round(w*0.06+i*w*0.88/Math.max(1,GA-1)), ay=base-Math.round(h*(0.42+((i%3)*0.11)));
+      var alen=Math.round(h*(0.10+ (i%3)*0.04));                 // tall enough to read on the big rock
+      var aamp=Math.round(w*0.05);                               // sway scales with sprite width
       for(var aj=0;aj<alen;aj++){
-        var aw=Math.sin(ph*TAU+i*0.9+aj*0.55)*3.4;
+        var aw=Math.sin(ph*TAU+i*0.9+aj*0.5)*aamp;
         var axx=cl(ax+Math.round(aw*(aj/alen)));
-        px(c, axx, ay-aj, rmp(aj>alen-3?6:3));
-        if(aj>alen-2) px(c, axx+1, ay-aj, rmp(7));
+        rp(c, axx, ay-aj, 2, 1, rmp(aj>alen-3?6:3));            // 2px wide = no dotted stalk
+        if(aj>alen-2) px(c, axx+1, ay-aj-1, rmp(7));            // bright tip
       }
     }
-    for(i=0;i<10;i++){                                       // motes drifting through the mouth
-      var mp=((ph+i*0.1)%1);
-      px(c, cl(cx-8+Math.round(Math.sin(mp*TAU+i)*7)), base-4-Math.round(mp*h*0.46), rmp(i%2?6:7));
+    for(i=0;i<dn(16);i++){                                    // motes drifting through the mouth
+      var mp=((ph+i*0.07)%1);
+      rp(c, cl(cx-Math.round(w*0.10)+Math.round(Math.sin(mp*TAU+i)*w*0.12)), base-4-Math.round(mp*h*0.55), 2,2, rmp(i%2?6:7));
     }
   } else if(id==='crystal'){
-    for(i=0;i<8;i++){                                        // shattered chips at the base
+    for(i=0;i<dn(8);i++){                                     // shattered chips at the base
       var chx=3+Math.round(rnd()*(w-6));
       rp(c,chx,base-2,2+Math.round(rnd()*2),2,rmp(1)); px(c,chx,base-3,rmp(6));
     }
-    for(i=0;i<6;i++){
-      var sx=6+i*9, sh2=Math.round(h*(0.30+rnd()*0.62)), sw=3+Math.round(rnd()*3);
+    var CS=Math.max(6,Math.round(w/11));
+    for(i=0;i<CS;i++){
+      var sx=6+i*(w-12)/Math.max(1,CS-1), sh2=Math.round(h*(0.30+rnd()*0.62)), sw=3+Math.round(rnd()*3);
       var lean2=(rnd()*2-1)*4;
       spike(c,sx,base,sw+1,sh2,lean2,rmp(0));
       spike(c,sx,base-1,sw,sh2-2,lean2,rmp(3));
@@ -2142,12 +2185,15 @@ function drawDecor(c,id,w,h,seed,ph){
       /* a band of inner light travels up the shard - the whole shard breathes */
       var gpos=((ph+i*0.17)%1);
       var gy=base-3-Math.round(gpos*(sh2-8));
-      for(var gj=0;gj<4;gj++){
-        var gyy=gy+gj;
-        if(gyy<base-2 && gyy>base-sh2)
-          rp(c, cl(sx+Math.round(lean2*((base-gyy)/sh2))-1), gyy, Math.max(1,sw-1), 1, rmp(gj<2?7:6));
+      var gband=Math.max(6,Math.round(sh2*0.22));               // band scales with the shard
+      for(var gj=0;gj<gband;gj++){
+        var gyy=gy+gj-Math.round(gband/2);
+        if(gyy<base-2 && gyy>base-sh2){
+          var near=1-Math.abs(gj-gband/2)/(gband/2);            // brightest at band centre
+          rp(c, cl(sx+Math.round(lean2*((base-gyy)/sh2))-1), gyy, Math.max(1,sw-1), 1, rmp(near>0.6?7:6));
+        }
       }
-      px(c,cl(sx),base-sh2+2,rmp(7));
+      px(c,cl(sx),base-sh2+2, (0.5+0.5*Math.sin(ph*TAU+i))>0.5?rmp(7):rmp(6));  // tip twinkles
     }
   } else if(id==='vent'){
     dome(c,cx,base,Math.round(w*0.48),h-2,rmp(0));
@@ -2162,7 +2208,7 @@ function drawDecor(c,id,w,h,seed,ph){
     }
     dome(c,cx,base,4,Math.round(h*0.55),rmp(0));
     dome(c,cx,base,3,Math.round(h*0.50),'#0a1c24');
-    for(i=0;i<26;i++) px(c,Math.round(2+rnd()*(w-4)),Math.round(base-rnd()*(h-6)), rnd()<0.5?rmp(6):rmp(2));
+    for(i=0;i<dn(26);i++){ var vsx=Math.round(2+rnd()*(w-5)),vsy=Math.round(base-rnd()*(h-7)),vsc=rnd()<0.5?rmp(6):rmp(2); rp(c,vsx,vsy,2,2,vsc); }
     /* glowing cracks that pulse with the vent */
     var glow=0.5+0.5*Math.sin(ph*TAU);
     for(i=0;i<4;i++){
@@ -2171,22 +2217,27 @@ function drawDecor(c,id,w,h,seed,ph){
       px(c,cl(gx2+1),gy2+1, glow>0.5?rmp(6):rmp(4));
     }
     /* heat shimmer climbing out of the mouth, three plumes on a loop */
-    for(i=0;i<6;i++){
-      var pr=((ph+i/6)%1);
-      var ry2=base-Math.round(h*0.46)-Math.round(pr*h*0.50);
-      var rw=1+Math.round(pr*5);
+    for(i=0;i<10;i++){
+      var pr=((ph+i/10)%1);
+      var ry2=base-Math.round(h*0.42)-Math.round(pr*h*0.55);
+      var rw=1+Math.round(pr*Math.round(w*0.10));
       if(ry2>0){
         for(var pk=-1;pk<=1;pk++){
-          px(c,cl(cx-rw+pk),ry2,rmp(pk===0?7:6));
-          px(c,cl(cx+rw+pk),ry2,rmp(pk===0?7:6));
+          rp(c,cl(cx-rw+pk),ry2,1,2,rmp(pk===0?7:6));
+          rp(c,cl(cx+rw+pk),ry2,1,2,rmp(pk===0?7:6));
         }
-        px(c,cl(cx-rw+1),ry2+1,rmp(5)); px(c,cl(cx+rw-1),ry2+1,rmp(5));
         px(c,cl(cx),ry2-1,rmp(7));
       }
     }
-    for(i=0;i<8;i++){                                        // crust that glitters as heat passes
+    for(i=0;i<dn(5);i++){                                     // bubbles rising from the mouth
+      var vp=((ph+i*0.2)%1);
+      var vbx=cl(cx+Math.round(Math.sin(vp*7+i)*w*0.14));
+      var vby=base-Math.round(h*0.30)-Math.round(vp*h*0.60);
+      circ(c,vbx,vby,1+Math.round(vp*2),rmp(7));
+    }
+    for(i=0;i<dn(8);i++){                                     // crust that glitters as heat passes
       var gtx=cl(4+Math.round(rnd()*(w-8))), gty=base-2-Math.round(rnd()*h*0.5);
-      px(c,gtx,gty, (Math.sin(ph*TAU+i)>0.2)?rmp(7):rmp(3));
+      rp(c,gtx,gty,2,1,(Math.sin(ph*TAU+i)>0.2)?rmp(7):rmp(3));
     }
     circ(c,cx,base-Math.round(h*0.50),2, glow>0.5?rmp(7):rmp(4));
     if(glow>0.75) circ(c,cx,base-Math.round(h*0.50),3,rmp(6));
@@ -2202,17 +2253,128 @@ function drawDecor(c,id,w,h,seed,ph){
       var rux=cx-6+((i%3)*6), ruy=base-18-Math.floor(i/3)*10;
       px(c,rux,ruy,rmp(1)); px(c,rux+1,ruy,rmp(1)); px(c,rux,ruy+1,rmp(1)); px(c,rux+1,ruy-1,rmp(6));
     }
-    for(i=0;i<30;i++) px(c,Math.round(cx-12+rnd()*24),Math.round(base-8-rnd()*48), rnd()<0.5?rmp(1):rmp(6));
-    for(i=0;i<7;i++){                                        // moss creeping up the base
+    for(i=0;i<dn(30);i++){ var isx=Math.round(cx-w*0.28+rnd()*w*0.56),isy=Math.round(base-8-rnd()*(h-16)),isc=rnd()<0.5?rmp(1):rmp(6); rp(c,isx,isy,2,2,isc); }
+    for(i=0;i<dn(7);i++){                                     // moss creeping up the base
       var mox=cx-12+Math.round(rnd()*24);
-      px(c,cl(mox),base-8-Math.round(rnd()*6),rmp(5));
+      rp(c,cl(mox),base-8-Math.round(rnd()*6),2,2,rmp(5));
     }
     var eye=0.5+0.5*Math.sin(ph*TAU);
     circ(c,cx,base-50,3,rmp(0));
     circ(c,cx,base-50,2, eye>0.55?rmp(7):rmp(3));
     if(eye>0.8){ px(c,cx,base-51,rmp(7)); circ(c,cx,base-50,3,rmp(6)); circ(c,cx,base-50,2,rmp(7)); }
-    var shy=base-18-Math.round(((ph+0.35)%1)*36);
-    for(var sj=-7;sj<=7;sj++) px(c, cl(cx+sj), shy+Math.round(Math.abs(sj)*0.3), rmp(6));
+    var shy=base-18-Math.round(((ph+0.35)%1)*(h*0.5));
+    for(var sj=-Math.round(w*0.16);sj<=Math.round(w*0.16);sj++) px(c, cl(cx+sj), shy+Math.round(Math.abs(sj)*0.3), rmp(6));
+    /* sparks orbiting the idol - it feels charged, not just carved */
+    for(i=0;i<dn(6);i++){
+      var sang=ph*TAU + i*(TAU/6);
+      var srad=Math.round(w*0.28 + Math.sin(ph*TAU*0.7+i)*w*0.06);
+      var sxo=cl(cx+Math.round(Math.cos(sang)*srad));
+      var syo=base-Math.round(h*0.55)+Math.round(Math.sin(sang)*h*0.28);
+      rp(c,sxo,syo,2,2,(i%2)?rmp(7):rmp(6));
+    }
+  } else if(id==='wreck'){
+    /* a sunken pirate ship, listing to starboard on the sea floor. The timber does
+       not move (it is a wreck), but everything AROUND it lives: a tattered flag on
+       the broken mast sways, seaweed on the hull drifts, bubbles seep from the hold,
+       and a lantern in the cabin flickers. */
+    var hullW=Math.round(w*0.80), hullH=Math.round(h*0.42);
+    var hcx=Math.round(w*0.50), hy=base-Math.round(hullH*0.5);
+    var tilt=Math.round(h*0.06);                                  // the whole hull lists a little
+
+    /* ---- hull: a rounded-bottom boat shape, planked ---- */
+    for(var yy=0; yy<hullH; yy++){
+      var ty=yy/hullH;                                            // 0 top .. 1 keel
+      var hw=Math.round(hullW*0.5*(1 - ty*ty*0.65));              // narrows toward the keel
+      var yline=base-hullH+yy+Math.round(tilt*(0.5-ty));
+      var edge=(yy<2)?rmp(1):(yy>hullH-3?rmp(0):null);
+      var body = ty<0.30?rmp(4):(ty<0.65?rmp(3):rmp(2));
+      rp(c, cl(hcx-hw), yline, hw*2, 1, edge||body);
+      rp(c, cl(hcx-hw), yline, Math.max(1,Math.round(hw*0.5)), 1, mixHex(body,R[6],0.35)); // lit port side
+      if(yy%5===0){                                                // plank seams
+        for(var pxk=-hw+2; pxk<hw-2; pxk+=Math.max(6,Math.round(w*0.05)))
+          px(c, cl(hcx+pxk), yline, rmp(1));
+      }
+    }
+    /* keel line + a broken gash in the hull */
+    rp(c, cl(hcx-Math.round(hullW*0.30)), base-2, Math.round(hullW*0.6), 2, rmp(0));
+    for(var gk=0; gk<Math.round(hullH*0.5); gk++)
+      rp(c, cl(hcx+Math.round(hullW*0.18)+Math.round(gk*0.4)), base-hullH*0.4-gk, 3, 1, '#06121a'); // dark hole
+
+    /* ---- gunwale rail + three portholes with a flickering lantern in one ---- */
+    var railY=base-hullH+Math.round(tilt*0.2);
+    rp(c, cl(hcx-hullW*0.5), railY-2, hullW, 2, rmp(5));
+    for(var po=0; po<3; po++){
+      var px2=hcx+Math.round((po-1)*hullW*0.26);
+      circ(c, cl(px2), railY+Math.round(hullH*0.28), Math.max(3,Math.round(w*0.03)), rmp(0));
+      var lit = (po===1) ? (0.5+0.5*Math.sin(ph*TAU*1.3) > 0.55) : false;
+      circ(c, cl(px2), railY+Math.round(hullH*0.28), Math.max(2,Math.round(w*0.02)), lit?'#ffd86a':rmp(1));
+      if(lit) circ(c, cl(px2), railY+Math.round(hullH*0.28), 1, '#fff2c0');
+    }
+
+    /* ---- broken mast leaning to starboard, with rigging ---- */
+    var mx=hcx-Math.round(hullW*0.10), mtop=base-Math.round(h*0.80), mlean=Math.round(w*0.16);
+    for(var my=0; my<(base-hullH)-mtop; my++){
+      var mt=my/((base-hullH)-mtop);
+      var mxx=mx+Math.round(mlean*mt);
+      rp(c, cl(mxx-2), base-hullH-my, 4, 1, rmp(2));
+      px(c, cl(mxx-2), base-hullH-my, rmp(5));
+    }
+    var mEndX=mx+mlean, mEndY=mtop;
+    /* a broken cross-spar */
+    rp(c, cl(mEndX-Math.round(w*0.10)), mEndY+Math.round(h*0.08), Math.round(w*0.22), 2, rmp(2));
+    /* rigging ropes from spar to rail */
+    for(var rr=0; rr<3; rr++){
+      var rex=mEndX-Math.round(w*0.09)+Math.round(rr*w*0.09);
+      var rprev=null;
+      for(var rt=0; rt<=40; rt++){
+        var u=rt/40;
+        var rx3=cl(Math.round(rex+(hcx-hullW*0.3+rr*hullW*0.3 - rex)*u));
+        var ry3=Math.round((mEndY+h*0.08)+((railY)-(mEndY+h*0.08))*u);
+        if(rprev){                                                 // fill the gap so the rope is a line, not dots
+          var y0=Math.min(rprev.y,ry3), y1=Math.max(rprev.y,ry3);
+          rp(c, rx3, y0, 1, (y1-y0)+1, rmp(1));
+        } else px(c, rx3, ry3, rmp(1));
+        rprev={x:rx3,y:ry3};
+      }
+    }
+
+    /* ---- tattered flag on the mast top - THIS sways every frame ---- */
+    var fx=mEndX, fy=mEndY;
+    for(var fseg=0; fseg<Math.round(w*0.12); fseg++){
+      var wav=Math.sin(ph*TAU*1.5 + fseg*0.35)*Math.round(h*0.02)*(fseg/(w*0.12));
+      var fyy=Math.max(2, fy+Math.round(wav));
+      var fh=Math.max(2, Math.round(h*0.05) - Math.round(fseg*0.15));
+      rp(c, cl(fx+fseg), fyy, 1, fh, rmp(0));
+      rp(c, cl(fx+fseg), fyy+1, 1, Math.max(1,fh-2), '#7a1520');   // faded red flag
+      if(fseg%3===0) px(c, cl(fx+fseg), fyy+Math.round(fh*0.4), '#d8c090'); // skull speck
+    }
+
+    /* ---- seaweed growing on the hull - drifts with the current ---- */
+    for(var wv=0; wv<dn(7); wv++){
+      var wvx=hcx+Math.round((rnd()*2-1)*hullW*0.46);
+      var wvh=Math.round(h*(0.16+rnd()*0.20));
+      for(var wy=0; wy<wvh; wy++){
+        var wt=wy/wvh;
+        var wxo=Math.round(Math.sin(ph*TAU + wv + wt*2.5)*Math.round(w*0.055)*wt*wt);
+        rp(c, cl(wvx+wxo), base-Math.round(hullH*0.5)-wy, 2,1, wt>0.6?R[6]:rmp(3));
+        if(wy%4===0) px(c, cl(wvx+wxo+1), base-Math.round(hullH*0.5)-wy, R[4]);
+      }
+    }
+
+    /* ---- bubbles seeping up from the hold, a steady stream ---- */
+    for(var bb=0; bb<dn(6); bb++){
+      var bp=((ph + bb*0.17) % 1);
+      var bx2=hcx+Math.round((rnd()*2-1)*hullW*0.30);
+      var byy3=base-Math.round(hullH*0.5) - Math.round(bp*h*0.90);
+      var br=1+Math.round(bp*2);
+      circ(c, cl(bx2+Math.round(Math.sin(bp*8+bb)*4)), byy3, br, R[7]);
+    }
+
+    /* barnacle / rust speckle over the timber, connected 2x2 grain */
+    for(i=0;i<dn(30);i++){
+      var wsx=cl(Math.round(hcx-hullW*0.5+rnd()*hullW)), wsy=base-Math.round(rnd()*hullH);
+      rp(c, wsx, wsy, 2, 2, rnd()<0.5?rmp(1):rmp(4));
+    }
   }
 }
 
@@ -2222,8 +2384,8 @@ function bakeDecor(){
     for(var v=0;v<2;v++){
       for(var f=0;f<DECOR_F;f++){
         (function(d,v,f){
-          SPR.decor[d.id].push(makeSprite(d.w,d.h,function(c,w,h){
-            drawDecor(c,d.id,w,h,0x5EED+d.id.length*97+v*31, f/DECOR_F);
+          SPR.decor[d.id].push(makeSprite(d.w, d.h, function(c,w,h){
+            drawDecor(c, d.id, w, h, 0x5EED+d.id.length*97+v*31, f/DECOR_F);
           }));
         })(d,v,f);
       }
@@ -3083,23 +3245,32 @@ function drawScene(c){
     var oimg=SPR.orn[orn.val];
     c.drawImage(oimg, Math.round(W*0.5-oimg.width/2), FLOOR-oimg.height+8);
   }
-  /* decor sits on the floor, behind everything alive */
+  /* Decor is BACKGROUND scenery now: big, and pushed onto the far plane so the fish
+     read clearly in front of it. We draw it dimmer, then wash it with the water haze -
+     the same trick the distant parallax layers use to sit "further back". */
   for(var di=0;di<G.decor.length;di++){
     var dd=G.decor[di], def=decorDef(dd.id);
     if(!def) continue;
     var dimg=decorImg(dd.id, dd.v||0, Math.floor(G.t*5 + (dd.x||0)*0.07));
     if(!dimg) continue;
+    c.globalAlpha=0.82;                                     // slightly faded = further away
     c.drawImage(dimg, Math.round(dd.x-dimg.width/2), FLOOR-dimg.height+6);
-    if(G.buildOpen && G.buildTab==='decor'){
-      /* name tag so you can tell what you planted */
-      var def2=decorDef(dd.id);
-      text(c, def2?def2.name.split(' ')[0]:'', dd.x, FLOOR-dimg.height-30, 6, '#bfe8f0', 'center');
-      /* an explicit little bin button - the ONLY way to remove, so nothing goes by accident */
-      var bxx=dd.x, byy=FLOOR-dimg.height-20;
+    c.globalAlpha=1;
+  }
+  /* one wash of water colour over ALL the decor, so it recedes as one far plane */
+  c.fillStyle='rgba(26,104,120,0.22)'; c.fillRect(0,SURFACE-8,W,FLOOR-SURFACE+16);
+  /* the build-mode name tags and bin buttons are UI - drawn crisp, on top, not dimmed */
+  for(var dj=0;dj<G.decor.length;dj++){
+    var dd2=G.decor[dj], def3=decorDef(dd2.id);
+    if(!def3){ continue; }
+    var dimg3=decorImg(dd2.id, dd2.v||0, 0);
+    if(G.buildOpen && G.buildTab==='decor' && dimg3){
+      text(c, def3.name.split(' ')[0], dd2.x, FLOOR-dimg3.height-30, 6, '#bfe8f0', 'center');
+      var bxx=dd2.x, byy=FLOOR-dimg3.height-20;
       circ(c,bxx,byy,10,'#7a2030'); circ(c,bxx,byy,9,'#b83048');
       rp(c,bxx-4,byy-1,8,2,'#ffe0e8'); rp(c,bxx-1,byy-4,2,8,'#ffe0e8');
-      dd._bin={x:bxx-12,y:byy-12,w:24,h:24};
-    } else { dd._bin=null; }
+      dd2._bin={x:bxx-12,y:byy-12,w:24,h:24};
+    } else { dd2._bin=null; }
   }
   /* caustics on floor */
   c.globalCompositeOperation='lighter';
@@ -3409,7 +3580,8 @@ function drawUI(c){
     }
     if(G.buildTab==='decor'){
       for(var bi=0;bi<DECOR.length;bi++){
-        var d=DECOR[bi], sx2=130+bi*136, sel=(bi===G.buildIdx);
+        var d=DECOR[bi]; if(d.scOnly){ BTN['slot'+bi]=null; continue; }   // wreck is showcase-only
+        var sx2=130+bi*136, sel=(bi===G.buildIdx);
         var slot={x:sx2,y:sy+4,w:130,h:74};
         panel(c,slot.x,slot.y,slot.w,slot.h, sel?'#175f6d':'#0b2b36');
         var dimg2=decorImg(d.id,0,0);
@@ -3424,7 +3596,7 @@ function drawUI(c){
       }
       /* the slot of the piece in hand glows; otherwise show what is selected */
       for(var hi=0;hi<DECOR.length;hi++){
-        if(G.placing===DECOR[hi].id && BTN['slot'+hi]){ var hb=BTN['slot'+hi]; rp(c,hb.x,hb.y,hb.w,2,'#00ff5a'); }
+        if(!DECOR[hi].scOnly && G.placing===DECOR[hi].id && BTN['slot'+hi]){ var hb=BTN['slot'+hi]; rp(c,hb.x,hb.y,hb.w,2,'#00ff5a'); }
       }
       var pk=DECOR[G.buildIdx];
       if(pk && !G.placing) text(c, 'TAP A PIECE TO PICK IT UP  -  '+pk.name+'  '+pk.cost+' PEARLS',
@@ -3706,6 +3878,14 @@ function drawShowcase(c){
   for(var d=0;d<G.scDecor.length;d++){
     var sd=G.scDecor[d], dimg=decorImg(sd.id, 0, Math.floor(G.t*5 + (sd.x||0)*0.07));
     if(dimg) c.drawImage(dimg, Math.round(sd.x-dimg.width/2), FLOOR-dimg.height+6);
+    /* in DECORATE mode, with nothing in hand, show a red bin so you can erase it -
+       same explicit little button the tank uses, so nothing gets removed by accident */
+    if(G.scTool==='decorate' && !G.scPlacing && dimg){
+      var sbx=sd.x, sby=FLOOR-dimg.height-14;
+      circ(c,sbx,sby,11,'#7a2030'); circ(c,sbx,sby,10,'#b83048');
+      rp(c,sbx-5,sby-1,10,2,'#ffe0e8'); rp(c,sbx-1,sby-5,2,10,'#ffe0e8');
+      sd._bin={x:sbx-13,y:sby-13,w:26,h:26};
+    } else { sd._bin=null; }
   }
 
   text(c,'\u2605 YOUR SHOWCASE',W/2,14,12,'#ffe0a0','center');
@@ -3766,7 +3946,7 @@ function drawShowcase(c){
 
   /* a one-line hint for the active tool */
   var hint = G.scTool==='move' ? 'DRAG YOUR FISH TO ARRANGE THEM'
-           : G.scTool==='decorate' ? 'PICK A DECOR BELOW, THEN TAP THE FLOOR'
+           : G.scTool==='decorate' ? (G.scPlacing ? 'TAP THE FLOOR TO PLACE  \u2022  TAP THE TRAY AGAIN TO CANCEL' : 'PICK A DECOR BELOW, OR TAP A RED BIN TO REMOVE')
            : 'TAP A FISH TO NAME IT';
   text(c,hint,W/2,H-58,7,'#9fe8dc','center');
 
@@ -4279,6 +4459,17 @@ function onDown(e){
     // tool switch
     for(var t=0;t<3;t++){ if(BTN['sctool'+t] && hit(BTN['sctool'+t],p)){ G.scTool=BTN['sctool'+t]._k; G.scPlacing=null; G.scDrag=null; return; } }
     if(G.scTool==='decorate'){
+      // tap a red bin to erase that piece (only shown when nothing is in hand)
+      if(!G.scPlacing){
+        for(var eb=0;eb<G.scDecor.length;eb++){
+          var ebin=G.scDecor[eb]._bin;
+          if(ebin && hit(ebin,p)){
+            var gone=decorDef(G.scDecor[eb].id);
+            G.scDecor.splice(eb,1);
+            sfx('decor'); toast((gone?gone.name:'DECOR')+' REMOVED'); save(); return;
+          }
+        }
+      }
       // pick a decor to place (tap tray), or place the held one on the floor
       for(var k in BTN){ if(k.indexOf('scdec')===0 && hit(BTN[k],p)){ G.scPlacing = (G.scPlacing===BTN[k]._id)?null:BTN[k]._id; return; } }
       if(G.scPlacing && p.y<H-110){
@@ -4364,7 +4555,7 @@ function onDown(e){
       }
     } else {
       for(var bj=0;bj<DECOR.length;bj++){
-        if(hit(BTN['slot'+bj],p)){
+        if(BTN['slot'+bj] && hit(BTN['slot'+bj],p)){
           var picked=DECOR[bj];
           if(G.placing===picked.id){ G.placing=null; }           // tap again = put it back
           else if(G.pearls<picked.cost){ toast('NOT ENOUGH PEARLS'); sfx('nope'); }
@@ -4562,7 +4753,7 @@ function askName(){
 }
 /* expose for the headless test harness */
 if(typeof window!=='undefined'){
-  window.__DG={G:G,get BTN(){return BTN;},setRenderTarget:function(nc){ cv=nc; ctx=nc.getContext('2d'); ctx.imageSmoothingEnabled=false; },tryResume:tryResume,bakeGlass:bakeGlass,PATRON:PATRON,patronDef:patronDef,fundPlaque:fundPlaque,collectionComplete:collectionComplete,get _lastFills(){return _glassFills;},audioReport:audioReport,audioTest:audioTest,speciesCount:speciesCount,discover:discover,get confirmBtns(){return G.confirmBtns;},isFinalForm:isFinalForm,SPECIES:SPECIES,TIPS:TIPS,COSMETICS:COSMETICS,sellPrice:sellPrice,cosmeticDef:cosmeticDef,equipped:equipped,addStars:addStars,BADGES:BADGES,badgeDef:badgeDef,badgeStat:badgeStat,checkBadges:checkBadges,ts:ts,UI_MIN:UI_MIN,codexPages:codexPages,CODEX_PER_PAGE:CODEX_PER_PAGE,codexCell:codexCell,runAway:runAway,AWAY_CAP:AWAY_CAP,sessionStart:sessionStart,sessionEmpty:sessionEmpty,tipTick:tipTick,dismissTip:dismissTip,tipDef:tipDef,SPR:SPR,RIPEN:RIPEN,BIOMES:BIOMES,setBiome:setBiome,biomeDef:biomeDef,bakeScene:bakeScene,AU:AU,audioInit:audioInit,armAudio:armAudio,audioReady:audioReady,unlockSession:unlockSession,audioMute:audioMute,musicTick:musicTick,sfx:sfx,musicStep:musicStep,ACHS:ACHS,LOCKED_BASE:LOCKED_BASE,availableBase:availableBase,newGame:newGame,checkAchs:checkAchs,bumpStat:bumpStat,LB:LB,lbVisible:lbVisible,hasSave:hasSave,fishFrames:fishFrames,fishGlow:fishGlow,SIGNAL:SIGNAL,releaseFish:releaseFish,settleFish:settleFish,EVENT_T:EVENT_T,tankFull:tankFull,RANK_O2:RANK_O2,DECOR:DECOR,DECOR_MAX:DECOR_MAX,QUEST_POOL:QUEST_POOL,placeDecor:placeDecor,removeDecor:removeDecor,recalcEnv:recalcEnv,questEvent:questEvent,fillQuests:fillQuests,questDef:questDef,save:save,update:update,render:render,feedBaby:feedBaby,decorImg:decorImg,DECOR_F:DECOR_F,tryMerge:tryMerge,mergeKind:mergeKind,CHIMERA:CHIMERA,CHIMERA_CHANCE:CHIMERA_CHANCE,chimeraKey:chimeraKey,
+  window.__DG={G:G,get BTN(){return BTN;},setRenderTarget:function(nc){ cv=nc; ctx=nc.getContext('2d'); ctx.imageSmoothingEnabled=false; },tryResume:tryResume,bakeGlass:bakeGlass,PATRON:PATRON,patronDef:patronDef,fundPlaque:fundPlaque,collectionComplete:collectionComplete,get _lastFills(){return _glassFills;},audioReport:audioReport,audioTest:audioTest,speciesCount:speciesCount,discover:discover,get confirmBtns(){return G.confirmBtns;},isFinalForm:isFinalForm,SPECIES:SPECIES,TIPS:TIPS,COSMETICS:COSMETICS,sellPrice:sellPrice,cosmeticDef:cosmeticDef,equipped:equipped,addStars:addStars,BADGES:BADGES,badgeDef:badgeDef,badgeStat:badgeStat,checkBadges:checkBadges,ts:ts,UI_MIN:UI_MIN,codexPages:codexPages,CODEX_PER_PAGE:CODEX_PER_PAGE,codexCell:codexCell,runAway:runAway,AWAY_CAP:AWAY_CAP,sessionStart:sessionStart,sessionEmpty:sessionEmpty,tipTick:tipTick,dismissTip:dismissTip,tipDef:tipDef,SPR:SPR,RIPEN:RIPEN,BIOMES:BIOMES,setBiome:setBiome,biomeDef:biomeDef,bakeScene:bakeScene,AU:AU,audioInit:audioInit,armAudio:armAudio,audioReady:audioReady,unlockSession:unlockSession,audioMute:audioMute,musicTick:musicTick,sfx:sfx,musicStep:musicStep,ACHS:ACHS,LOCKED_BASE:LOCKED_BASE,availableBase:availableBase,newGame:newGame,checkAchs:checkAchs,bumpStat:bumpStat,LB:LB,lbVisible:lbVisible,hasSave:hasSave,fishFrames:fishFrames,fishGlow:fishGlow,SIGNAL:SIGNAL,releaseFish:releaseFish,settleFish:settleFish,EVENT_T:EVENT_T,tankFull:tankFull,RANK_O2:RANK_O2,DECOR:DECOR,DECOR_MAX:DECOR_MAX,QUEST_POOL:QUEST_POOL,placeDecor:placeDecor,removeDecor:removeDecor,recalcEnv:recalcEnv,questEvent:questEvent,fillQuests:fillQuests,questDef:questDef,save:save,update:update,render:render,feedBaby:feedBaby,decorImg:decorImg,DECOR_F:DECOR_F,decorDef:decorDef,drawDecor:drawDecor,onDown:onDown,recalcOxygen:recalcOxygen,tryMerge:tryMerge,mergeKind:mergeKind,CHIMERA:CHIMERA,CHIMERA_CHANCE:CHIMERA_CHANCE,chimeraKey:chimeraKey,
     makeFish:makeFish,spawnFry:spawnFry,boot:boot,recalcOxygen:recalcOxygen,
     RANK_LEN:RANK_LEN,creatureCanvasSize:creatureCanvasSize,drawCreature:drawCreature,
     SPECIES_ORDER:SPECIES_ORDER,addPearls:addPearls,PEARL_CAP:PEARL_CAP,load:load,FOODS:FOODS};
