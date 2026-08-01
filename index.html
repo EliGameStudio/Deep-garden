@@ -50,7 +50,7 @@
    Phase 1: core loop (swim / feed / grow / breed / merge / evolve)
    ============================================================ */
 
-var VERSION = 'v6.6';
+var VERSION = 'v6.7';
 var W = 960, H = 540;
 var SAVE_KEY = 'deepgarden_save_v1';
 var FLOOR = 476;          // substrate top
@@ -3898,10 +3898,16 @@ function drawShowcase(c){
   /* the trophy fish - stand still in MOVE mode so you can arrange them, drift otherwise */
   for(var i=0;i<G.showcase.length;i++){
     var z=G.showcase[i];
+    if(z.face===undefined) z.face=z.dir||1;                 // which way the sprite currently points
     if(G.scTool!=='move' || G.scDrag===z){
       // gentle drift when not arranging
-      if(G.scDrag!==z){ z.x += Math.sin(G.t*0.5+z.bob)*0.25*z.dir;
-        if(z.x<80){ z.x=80; z.dir=1; } if(z.x>W-80){ z.x=W-80; z.dir=-1; } }
+      if(G.scDrag!==z){
+        var vx=Math.sin(G.t*0.5+z.bob)*0.25*z.dir;          // this frame's actual horizontal move
+        z.x += vx;
+        if(z.x<80){ z.x=80; z.dir=1; } if(z.x>W-80){ z.x=W-80; z.dir=-1; }
+        // face the way it is really moving, not a fixed side, or it swims tail-first
+        if(vx>0.02) z.face=1; else if(vx<-0.02) z.face=-1;
+      }
     }
     var by=(G.scDrag===z)?z.y:z.y+Math.sin(G.t*1.1+z.bob)*5;
     var frames=fishFrames(z.sp,z.rank);
@@ -3909,7 +3915,7 @@ function drawShowcase(c){
     var gl=fishGlow(z.sp);
     if(gl){ c.globalAlpha=0.5; c.drawImage(gl,Math.round(z.x-gl.width/2),Math.round(by-gl.height/2)); c.globalAlpha=1; }
     c.save();
-    if(z.dir<0){ c.translate(Math.round(z.x),0); c.scale(-1,1); c.drawImage(img,Math.round(-img.width/2),Math.round(by-img.height/2)); }
+    if(z.face<0){ c.translate(Math.round(z.x),0); c.scale(-1,1); c.drawImage(img,Math.round(-img.width/2),Math.round(by-img.height/2)); }
     else c.drawImage(img,Math.round(z.x-img.width/2),Math.round(by-img.height/2));
     c.restore();
     rp(c,Math.round(z.x)-6,Math.round(by-img.height/2)-8,12,2,'#c8a44e');   // gold crown
